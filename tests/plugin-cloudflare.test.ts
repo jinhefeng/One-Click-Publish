@@ -100,12 +100,13 @@ test("direct personal deployment uses PKCE, creates isolated Cloudflare resource
     if (path.endsWith("/subdomain") && method === "POST") { assert.equal(JSON.parse(String(init.body)).enabled, true); return jsonResponse({ enabled: true }); }
     if (path.endsWith("/secrets/BOOTSTRAP_SECRET") && method === "DELETE") return jsonResponse({});
     if (path.endsWith("/query") && method === "POST") return jsonResponse([{ success: true }]);
-    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note" }));
+    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note", version: "0.3.9" }));
     if (path.includes("/workers/scripts/") && method === "PUT") {
       const form = await new Response(init.body, { headers: init.headers }).formData();
       const metadata = JSON.parse(String(form.get("metadata")));
       assert.equal(metadata.main_module, "index.js");
       assert.equal(metadata.bindings.find((binding: any) => binding.type === "d1").id, "d1-uuid");
+      assert.equal(metadata.bindings.find((binding: any) => binding.name === "PUBLISH_NOTE_VERSION").text, "0.3.9");
       assert.match(await (form.get("index.js") as File).text(), /export/);
       return jsonResponse({});
     }
@@ -163,6 +164,74 @@ test("direct personal deployment uses PKCE, creates isolated Cloudflare resource
   assert.ok(calls.indexOf("GET /healthz") < calls.indexOf("POST /__internal/provision/initialize"));
 });
 
+test("updates an existing personal Worker in place so new publishing limits take effect", async () => {
+  const calls: string[] = [];
+  const requiredTables = [
+    "accounts", "recovery_codes", "sessions", "tokens", "sites", "revisions", "objects", "object_chunks",
+    "uploads", "upload_objects", "upload_chunks", "device_authorizations", "bootstrap_state",
+  ];
+  const fakeFetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const url = String(input);
+    const method = init.method || "GET";
+    if (url === "https://dash.cloudflare.com/oauth2/token") return new Response(JSON.stringify({ access_token: "cf-oauth-token" }), { status: 200 });
+    if (url === "https://dash.cloudflare.com/oauth2/revoke") { calls.push("oauth:revoke"); return new Response("{}", { status: 200 }); }
+    const parsed = new URL(url);
+    const path = parsed.pathname;
+    calls.push(`${method} ${path}`);
+    if (path.endsWith("/accounts")) return jsonResponse([{ id: "account-12345678", name: "Personal" }]);
+    if (path.endsWith("/d1/database") && method === "GET") return jsonResponse([{ uuid: "d1-uuid", name: "publish-note" }]);
+    if (path.endsWith("/workers/scripts") && method === "GET") return jsonResponse([{ id: "publish-note" }]);
+    if (path.endsWith("/d1/database/d1-uuid/query") && method === "POST") {
+      const sql = JSON.parse(String(init.body || "{}")).sql || "";
+      if (sql.includes("sqlite_master")) return jsonResponse([{ success: true, results: requiredTables.map((name) => ({ name })) }]);
+      if (sql.includes("PRAGMA table_info")) return jsonResponse([{ success: true, results: [{ name: "data" }] }]);
+      return jsonResponse([{ success: true }]);
+    }
+    if (path.endsWith("/workers/subdomain") && method === "GET") return jsonResponse({ subdomain: "personal-example" });
+    if (path.endsWith("/subdomain") && method === "POST") return jsonResponse({ enabled: true });
+    if (path.includes("/workers/scripts/") && method === "PUT") {
+      const form = await new Response(init.body, { headers: init.headers }).formData();
+      const module = await (form.get("index.js") as File).text();
+      const metadata = JSON.parse(String(form.get("metadata")));
+      assert.equal(metadata.bindings.find((binding: any) => binding.name === "PUBLISH_NOTE_VERSION").text, "0.3.9");
+      assert.doesNotMatch(module, /Account site limit exceeded|MAX_SITE_COUNT|Account storage quota exceeded|MAX_ACCOUNT_BYTES|52428800/);
+      return jsonResponse({});
+    }
+    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note", version: "0.3.9" }));
+    if (path === "/__internal/provision/reconnect") return new Response(JSON.stringify({ accountId: "historical-account", publishToken: "pn_updated_token" }), { status: 200 });
+    if (path.endsWith("/secrets/BOOTSTRAP_SECRET") && method === "DELETE") return jsonResponse({});
+    throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
+  };
+  const open = (url: string) => {
+    const state = new URL(url).searchParams.get("state") || "";
+    setImmediate(() => {
+      http.get(`http://127.0.0.1:8976/oauth/callback?code=authorization-code&state=${encodeURIComponent(state)}`, (response) => response.resume());
+    });
+  };
+  const { PluginClass } = loadPlugin({ fetchImpl: fakeFetch, openExternal: open });
+  const plugin = new PluginClass({});
+  plugin.data = {
+    language: "en", cloudflareMode: "self", apiBaseUrl: "https://note.openstaff.dev",
+    deploymentWorkerUrl: "https://publish-note.personal-example.workers.dev", deploymentOriginUrl: "https://publish-note.personal-example.workers.dev",
+    deploymentWorkerName: "publish-note", selfPublishToken: "pn_old_token", publishToken: "pn_old_token",
+    customDomain: "note.openstaff.dev", customDomainId: "domain-1", customDomainZoneName: "openstaff.dev", customDomainStatus: "active",
+    connectionProfiles: JSON.stringify({ self: { serviceUrl: "https://note.openstaff.dev", publishToken: "pn_old_token" } }),
+  };
+  plugin.settings = plugin.data;
+  plugin.saveData = async (data: any) => { plugin.data = JSON.parse(JSON.stringify(data)); };
+
+  assert.equal(await plugin.runDirectCloudflareDeployment(), true);
+  assert.equal(plugin.settings.selfPublishToken, "pn_updated_token");
+  assert.equal(plugin.settings.apiBaseUrl, "https://note.openstaff.dev");
+  assert.equal(plugin.settings.customDomain, "note.openstaff.dev");
+  assert.equal(plugin.settings.deploymentWorkerUrl, "https://publish-note.personal-example.workers.dev");
+  assert.ok(calls.includes("PUT /client/v4/accounts/account-12345678/workers/scripts/publish-note"));
+  assert.equal(calls.some((call) => call === "POST /client/v4/accounts/account-12345678/d1/database"), false);
+  assert.equal(calls.some((call) => call === "DELETE /client/v4/accounts/account-12345678/workers/scripts/publish-note"), false);
+  assert.equal(calls.filter((call) => call === "oauth:revoke").length, 1);
+  assert.ok(calls.includes("POST /__internal/provision/reconnect"));
+});
+
 test("personal deployment requests the Cloudflare-supported account page size", async () => {
   const paths: string[] = [];
   const fakeFetch = async (input: RequestInfo | URL) => {
@@ -176,6 +245,316 @@ test("personal deployment requests the Cloudflare-supported account page size", 
   const { PluginClass } = loadPlugin({ fetchImpl: fakeFetch });
   await assert.rejects(PluginClass.__testing.provisionPersonalCloudflare("cf-oauth-token"));
   assert.equal(paths[0], "/client/v4/accounts?per_page=50");
+});
+
+test("binds and unbinds a root custom domain through the user's Cloudflare account", async () => {
+  const calls: Array<{ method: string; url: string; body?: string }> = [];
+  const authorizationUrls: string[] = [];
+  let domains: any[] = [];
+  const fakeFetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const url = String(input);
+    const method = init.method || "GET";
+    calls.push({ method, url, body: typeof init.body === "string" ? init.body : undefined });
+    if (url === "https://dash.cloudflare.com/oauth2/token") return new Response(JSON.stringify({ access_token: "cf-domain-token" }), { status: 200 });
+    if (url === "https://dash.cloudflare.com/oauth2/revoke") return new Response("{}", { status: 200 });
+    const parsed = new URL(url);
+    if (parsed.pathname === "/client/v4/accounts") return jsonResponse([{ id: "account-domain" }]);
+    if (parsed.pathname === "/client/v4/accounts/account-domain/workers/domains" && method === "GET") return jsonResponse(domains);
+    if (parsed.pathname === "/client/v4/accounts/account-domain/workers/domains" && method === "PUT") {
+      const body = JSON.parse(String(init.body || "{}"));
+      domains = [{ id: "domain-1", hostname: body.hostname, service: body.service, zone_id: body.zone_id, zone_name: body.zone_name }];
+      return jsonResponse(domains[0]);
+    }
+    if (parsed.pathname === "/client/v4/accounts/account-domain/workers/domains/domain-1" && method === "DELETE") {
+      domains = [];
+      return jsonResponse({});
+    }
+    if (parsed.pathname === "/client/v4/zones" && parsed.searchParams.get("name") === "example.com") return jsonResponse([{ id: "zone-1", name: "example.com", status: "active" }]);
+    throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
+  };
+  const open = (url: string) => {
+    authorizationUrls.push(url);
+    const parsed = new URL(url);
+    setImmediate(() => {
+      http.get(`http://127.0.0.1:8976/oauth/callback?code=domain-code&state=${encodeURIComponent(parsed.searchParams.get("state") || "")}`, (response) => response.resume());
+    });
+  };
+  const { PluginClass, notices } = loadPlugin({ fetchImpl: fakeFetch, openExternal: open, windowValue: { confirm: () => true } });
+  const plugin = new PluginClass({});
+  plugin.data = {
+    language: "en", cloudflareMode: "self", apiBaseUrl: "https://publish-note.personal-example.workers.dev",
+    deploymentWorkerUrl: "https://publish-note.personal-example.workers.dev", deploymentOriginUrl: "https://publish-note.personal-example.workers.dev",
+    deploymentWorkerName: "publish-note", selfPublishToken: "pn_personal", publishToken: "pn_personal",
+    lastPublishedUrl: "https://publish-note.personal-example.workers.dev/s/site-1/",
+  };
+  await plugin.loadSettings();
+  assert.equal(await plugin.bindCustomDomain("https://example.com"), true, notices.join(" | "));
+  assert.equal(plugin.settings.customDomain, "example.com");
+  assert.equal(plugin.settings.apiBaseUrl, "https://example.com");
+  assert.equal(plugin.settings.deploymentWorkerUrl, "https://publish-note.personal-example.workers.dev");
+  assert.equal(plugin.settings.selfPublishToken, "pn_personal");
+  assert.equal(plugin.settings.lastPublishedUrl, "https://example.com/s/site-1/");
+  assert.equal(plugin.settings.deploymentOriginUrl, "https://publish-note.personal-example.workers.dev");
+  assert.equal(new URL(authorizationUrls[0]).searchParams.get("scope"), "account-settings.read workers-scripts.write workers-routes.write zone.read");
+  assert.equal(calls.some((call) => call.method === "PUT" && call.url.endsWith("/workers/domains")), true);
+  assert.equal(await plugin.unbindCustomDomain(), true);
+  assert.equal(plugin.settings.customDomain, "");
+  assert.equal(plugin.settings.apiBaseUrl, "https://publish-note.personal-example.workers.dev");
+  assert.equal(plugin.settings.deploymentWorkerUrl, "https://publish-note.personal-example.workers.dev");
+  assert.equal(plugin.settings.selfPublishToken, "pn_personal");
+  assert.equal(plugin.settings.lastPublishedUrl, "https://publish-note.personal-example.workers.dev/s/site-1/");
+  assert.equal(calls.some((call) => call.method === "DELETE" && call.url.endsWith("/workers/domains/domain-1")), true);
+  assert.ok(plugin.domainBindingSession.operationId);
+  assert.ok(plugin.domainBindingSession.logs.every((entry: any) => entry.operationId === plugin.domainBindingSession.operationId));
+});
+
+test("rejects a custom domain that is not a Zone in the authorized Cloudflare account", async () => {
+  const calls: Array<{ method: string; url: string }> = [];
+  const fakeFetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const url = String(input);
+    const method = init.method || "GET";
+    calls.push({ method, url });
+    if (url === "https://dash.cloudflare.com/oauth2/token") return new Response(JSON.stringify({ access_token: "cf-domain-token" }), { status: 200 });
+    if (url === "https://dash.cloudflare.com/oauth2/revoke") return new Response("{}", { status: 200 });
+    const parsed = new URL(url);
+    if (parsed.pathname === "/client/v4/accounts") return jsonResponse([{ id: "account-domain" }]);
+    if (parsed.pathname === "/client/v4/accounts/account-domain/workers/domains") return jsonResponse([]);
+    if (parsed.pathname === "/client/v4/zones" && parsed.searchParams.get("name") === "not-owned.example") return jsonResponse([]);
+    throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
+  };
+  const open = (url: string) => {
+    const parsed = new URL(url);
+    setImmediate(() => {
+      http.get(`http://127.0.0.1:8976/oauth/callback?code=domain-code&state=${encodeURIComponent(parsed.searchParams.get("state") || "")}`, (response) => response.resume());
+    });
+  };
+  const { PluginClass, notices } = loadPlugin({ fetchImpl: fakeFetch, openExternal: open });
+  const plugin = new PluginClass({});
+  plugin.data = {
+    language: "en", cloudflareMode: "self", apiBaseUrl: "https://publish-note.personal-example.workers.dev",
+    deploymentWorkerUrl: "https://publish-note.personal-example.workers.dev", deploymentOriginUrl: "https://publish-note.personal-example.workers.dev",
+    deploymentWorkerName: "publish-note", selfPublishToken: "pn_personal", publishToken: "pn_personal",
+  };
+  await plugin.loadSettings();
+
+  assert.equal(await plugin.bindCustomDomain("not-owned.example"), false);
+  assert.match(notices.join(" | "), /not an active Zone in the authorized Cloudflare account/);
+  assert.equal(calls.some((call) => call.method === "PUT"), false);
+  assert.equal(plugin.settings.customDomain, "");
+  assert.equal(plugin.settings.apiBaseUrl, "https://publish-note.personal-example.workers.dev");
+  assert.equal(plugin.settings.selfPublishToken, "pn_personal");
+});
+
+test("failed custom domain unbinding keeps the primary Cloudflare connection", async () => {
+  const calls: Array<{ method: string; url: string }> = [];
+  const fakeFetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const url = String(input);
+    const method = init.method || "GET";
+    calls.push({ method, url });
+    if (url === "https://dash.cloudflare.com/oauth2/token") return new Response(JSON.stringify({ access_token: "cf-domain-token" }), { status: 200 });
+    if (url === "https://dash.cloudflare.com/oauth2/revoke") return new Response("{}", { status: 200 });
+    const parsed = new URL(url);
+    if (parsed.pathname === "/client/v4/accounts") return jsonResponse([{ id: "account-domain" }]);
+    if (parsed.pathname === "/client/v4/accounts/account-domain/workers/domains" && method === "GET") return jsonResponse([{ id: "domain-1", hostname: "example.com", service: "publish-note" }]);
+    if (parsed.pathname === "/client/v4/accounts/account-domain/workers/domains/domain-1" && method === "DELETE") return new Response(JSON.stringify({ success: false, errors: [{ message: "Permission denied" }] }), { status: 403, headers: { "content-type": "application/json" } });
+    throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
+  };
+  const open = (url: string) => {
+    const parsed = new URL(url);
+    setImmediate(() => {
+      http.get(`http://127.0.0.1:8976/oauth/callback?code=domain-code&state=${encodeURIComponent(parsed.searchParams.get("state") || "")}`, (response) => response.resume());
+    });
+  };
+  const { PluginClass, notices } = loadPlugin({ fetchImpl: fakeFetch, openExternal: open });
+  const plugin = new PluginClass({});
+  plugin.data = {
+    language: "en", cloudflareMode: "self", apiBaseUrl: "https://example.com",
+    deploymentWorkerUrl: "https://publish-note.personal-example.workers.dev", deploymentOriginUrl: "https://publish-note.personal-example.workers.dev",
+    deploymentWorkerName: "publish-note", selfPublishToken: "pn_personal", publishToken: "pn_personal",
+    customDomain: "example.com", customDomainId: "domain-1", customDomainZoneName: "example.com", customDomainStatus: "active",
+    connectionProfiles: JSON.stringify({ self: { serviceUrl: "https://example.com", publishToken: "pn_personal" } }),
+  };
+  await plugin.loadSettings();
+
+  assert.equal(await plugin.unbindCustomDomain(), false);
+  assert.match(notices.join(" | "), /Could not unbind the custom domain/);
+  assert.equal(plugin.settings.customDomain, "example.com");
+  assert.equal(plugin.settings.apiBaseUrl, "https://example.com");
+  assert.equal(plugin.settings.deploymentWorkerUrl, "https://publish-note.personal-example.workers.dev");
+  assert.equal(plugin.settings.selfPublishToken, "pn_personal");
+  assert.equal(plugin.settings.connectionStatus, "connected");
+  assert.equal(calls.some((call) => call.method === "DELETE"), true);
+});
+
+test("custom domain unbinding keeps a recoverable marker when local save fails after Cloudflare deletion", async () => {
+  const calls: string[] = [];
+  const originUrl = "https://publish-note.personal-example.workers.dev";
+  const fakeFetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const url = String(input);
+    const method = init.method || "GET";
+    calls.push(`${method} ${url}`);
+    if (url === "https://dash.cloudflare.com/oauth2/token") return new Response(JSON.stringify({ access_token: "cf-domain-token" }), { status: 200 });
+    if (url === "https://dash.cloudflare.com/oauth2/revoke") return new Response("{}", { status: 200 });
+    const parsed = new URL(url);
+    if (parsed.pathname === "/client/v4/accounts") return jsonResponse([{ id: "account-domain" }]);
+    if (parsed.pathname === "/client/v4/accounts/account-domain/workers/domains" && method === "GET") return jsonResponse([{ id: "domain-1", hostname: "example.com", service: "publish-note" }]);
+    if (parsed.pathname === "/client/v4/accounts/account-domain/workers/domains/domain-1" && method === "DELETE") return jsonResponse({});
+    throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
+  };
+  const open = (url: string) => {
+    const state = new URL(url).searchParams.get("state") || "";
+    setImmediate(() => {
+      http.get(`http://127.0.0.1:8976/oauth/callback?code=domain-code&state=${encodeURIComponent(state)}`, (response) => response.resume());
+    });
+  };
+  const { PluginClass, notices } = loadPlugin({ fetchImpl: fakeFetch, openExternal: open });
+  const plugin = new PluginClass({});
+  plugin.data = {
+    language: "en", cloudflareMode: "self", apiBaseUrl: "https://example.com",
+    deploymentWorkerUrl: originUrl, deploymentOriginUrl: originUrl, deploymentWorkerName: "publish-note",
+    selfPublishToken: "pn_personal", publishToken: "pn_personal",
+    customDomain: "example.com", customDomainId: "domain-1", customDomainZoneName: "example.com", customDomainStatus: "active",
+  };
+  await plugin.loadSettings();
+  const originalSaveData = plugin.saveData.bind(plugin);
+  let failedFinalSave = false;
+  plugin.saveData = async (data: any) => {
+    if (!failedFinalSave && data.customDomain === "" && data.customDomainTransition === null) {
+      failedFinalSave = true;
+      throw new Error("Vault is read-only");
+    }
+    await originalSaveData(data);
+  };
+
+  assert.equal(await plugin.unbindCustomDomain(), false);
+  assert.equal(calls.some((call) => call.includes("DELETE https://api.cloudflare.com/client/v4/accounts/account-domain/workers/domains/domain-1")), true);
+  assert.equal(plugin.settings.customDomain, "example.com");
+  assert.equal(plugin.settings.selfPublishToken, "pn_personal");
+  assert.equal(plugin.settings.customDomainTransition?.state, "detaching");
+  assert.equal(plugin.domainBindingSession.error.code, "LOCAL_SETTINGS_SAVE_FAILED");
+  assert.equal(plugin.domainBindingSession.error.remoteOutcome, "detached");
+  assert.ok(plugin.domainBindingSession.error.causeMessage.includes("read-only"));
+  assert.match(notices.join(" | "), /local custom-domain state could not be saved/);
+});
+
+test("custom domain recovery finalizes local settings after Cloudflare no longer has the attachment", async () => {
+  const calls: string[] = [];
+  const originUrl = "https://publish-note.personal-example.workers.dev";
+  const fakeFetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const url = String(input);
+    const method = init.method || "GET";
+    calls.push(`${method} ${url}`);
+    if (url === "https://dash.cloudflare.com/oauth2/token") return new Response(JSON.stringify({ access_token: "cf-domain-token" }), { status: 200 });
+    if (url === "https://dash.cloudflare.com/oauth2/revoke") return new Response("{}", { status: 200 });
+    const parsed = new URL(url);
+    if (parsed.pathname === "/client/v4/accounts") return jsonResponse([{ id: "account-domain" }]);
+    if (parsed.pathname === "/client/v4/accounts/account-domain/workers/domains" && method === "GET") return jsonResponse([]);
+    throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
+  };
+  const open = (url: string) => {
+    const state = new URL(url).searchParams.get("state") || "";
+    setImmediate(() => {
+      http.get(`http://127.0.0.1:8976/oauth/callback?code=domain-code&state=${encodeURIComponent(state)}`, (response) => response.resume());
+    });
+  };
+  const { PluginClass } = loadPlugin({ fetchImpl: fakeFetch, openExternal: open });
+  const plugin = new PluginClass({});
+  plugin.data = {
+    language: "en", cloudflareMode: "self", apiBaseUrl: "https://example.com",
+    deploymentWorkerUrl: originUrl, deploymentOriginUrl: originUrl, deploymentWorkerName: "publish-note",
+    selfPublishToken: "pn_personal", publishToken: "pn_personal",
+    customDomain: "example.com", customDomainId: "domain-1", customDomainZoneName: "example.com", customDomainStatus: "active",
+    customDomainTransition: { state: "detaching", operationId: "domain-unbind-test", hostname: "example.com", domainId: "domain-1", originUrl, workerName: "publish-note", startedAt: new Date().toISOString() },
+    lastPublishedUrl: "https://example.com/s/site-1/",
+  };
+  await plugin.loadSettings();
+
+  assert.equal(await plugin.recoverCustomDomainTransition(), true);
+  assert.equal(plugin.settings.customDomain, "");
+  assert.equal(plugin.settings.apiBaseUrl, originUrl);
+  assert.equal(plugin.settings.customDomainTransition, null);
+  assert.equal(plugin.settings.lastPublishedUrl, "https://publish-note.personal-example.workers.dev/s/site-1/");
+  assert.equal(calls.filter((call) => call.includes("oauth2/revoke")).length, 1);
+});
+
+test("clearing deployment and technical diagnostics clears persisted and in-memory operation logs", async () => {
+  const { PluginClass } = loadPlugin({ desktop: false });
+  const plugin = new PluginClass({});
+  plugin.data = { language: "en", debugMode: true, deploymentLogs: [{ operationId: "op-1", stage: "resources", message: "old" }] };
+  await plugin.loadSettings();
+  plugin.deploymentSession = { operationId: "op-1", active: false, logs: [{ operationId: "op-1", stage: "resources", message: "old" }], error: new Error("old") };
+  assert.equal(await plugin.clearDeploymentLogs(), true);
+  assert.equal(plugin.settings.deploymentLogs.length, 0);
+  assert.equal(plugin.deploymentSession.logs.length, 0);
+
+  plugin.domainBindingSession = { operationId: "op-2", active: false, logs: [{ operationId: "op-2", stage: "authorization", message: "failed" }], error: new Error("failed") };
+  plugin.settings.deploymentLogs = [{ operationId: "op-2", stage: "authorization", message: "failed" }];
+  await plugin.saveSettings({ deploymentLogs: plugin.settings.deploymentLogs });
+  assert.equal(await plugin.clearOperationDiagnostics(plugin.domainBindingSession), true);
+  assert.equal(plugin.domainBindingSession, null);
+  assert.equal(plugin.settings.deploymentLogs.length, 0);
+});
+
+test("custom domain authorization denial keeps a visible sanitized diagnostic log", async () => {
+  const calls: string[] = [];
+  const fakeFetch = async (input: RequestInfo | URL) => {
+    calls.push(String(input));
+    throw new Error(`Cloudflare should not be called after authorization denial: ${String(input)}`);
+  };
+  const open = (url: string) => {
+    const state = new URL(url).searchParams.get("state") || "";
+    setImmediate(() => {
+      const description = encodeURIComponent("The user denied access to the requested domain permissions");
+      http.get(`http://127.0.0.1:8976/oauth/callback?error=access_denied&error_description=${description}&state=${encodeURIComponent(state)}`, (response) => response.resume());
+    });
+  };
+  const { PluginClass, notices } = loadPlugin({ fetchImpl: fakeFetch, openExternal: open, windowValue: { confirm: () => true } });
+  const plugin = new PluginClass({});
+  plugin.data = {
+    language: "en", cloudflareMode: "self", apiBaseUrl: "https://publish-note.personal-example.workers.dev",
+    deploymentWorkerUrl: "https://publish-note.personal-example.workers.dev", deploymentOriginUrl: "https://publish-note.personal-example.workers.dev",
+    deploymentWorkerName: "publish-note", selfPublishToken: "pn_personal", publishToken: "pn_personal", debugMode: true, debugLogs: [],
+  };
+  await plugin.loadSettings();
+
+  assert.equal(await plugin.bindCustomDomain("notes.example.com"), false);
+  assert.equal(calls.length, 0);
+  assert.equal(plugin.settings.customDomain, "");
+  const failure = plugin.domainBindingSession.logs.find((entry: any) => entry.code === "OAUTH_DENIED");
+  assert.ok(failure);
+  assert.equal(failure.providerCode, "access_denied");
+  assert.match(failure.providerMessage, /denied access/);
+  assert.equal(plugin.domainBindingSession.error.code, "OAUTH_DENIED");
+  await plugin.debugLogsWritePromise;
+  const debugFailure = plugin.settings.debugLogs.find((entry: any) => entry.code === "OAUTH_DENIED");
+  assert.ok(debugFailure);
+  assert.equal(debugFailure.providerCode, "access_denied");
+  assert.match(notices.join(" | "), /user denied access to the requested domain permissions/);
+});
+
+test("custom domain invalid scope explains the OAuth client configuration", async () => {
+  const fakeFetch = async (input: RequestInfo | URL) => {
+    throw new Error(`Cloudflare should not be called after invalid scope: ${String(input)}`);
+  };
+  const open = (url: string) => {
+    const state = new URL(url).searchParams.get("state") || "";
+    setImmediate(() => {
+      const description = encodeURIComponent("The OAuth 2.0 Client is not allowed to request scope 'workers-routes.write'.");
+      http.get(`http://127.0.0.1:8976/oauth/callback?error=invalid_scope&error_description=${description}&state=${encodeURIComponent(state)}`, (response) => response.resume());
+    });
+  };
+  const { PluginClass, notices } = loadPlugin({ fetchImpl: fakeFetch, openExternal: open, windowValue: { confirm: () => true } });
+  const plugin = new PluginClass({});
+  plugin.data = {
+    language: "en", cloudflareMode: "self", apiBaseUrl: "https://publish-note.personal-example.workers.dev",
+    deploymentWorkerUrl: "https://publish-note.personal-example.workers.dev", deploymentOriginUrl: "https://publish-note.personal-example.workers.dev",
+    deploymentWorkerName: "publish-note", selfPublishToken: "pn_personal", publishToken: "pn_personal",
+  };
+  await plugin.loadSettings();
+
+  assert.equal(await plugin.bindCustomDomain("notes.example.com"), false);
+  assert.match(notices.join(" | "), /does not allow the Workers Routes Write scope/);
+  assert.equal(plugin.domainBindingSession.error.providerCode, "invalid_scope");
 });
 
 test("personal deployment is unavailable on mobile while the plugin remains loadable", async () => {
@@ -252,7 +631,7 @@ test("personal deployment reuses a recognized historical One-Click Publish D1 an
       assert.equal(metadata.bindings.find((binding: any) => binding.name === "DB").id, "historical-db");
       return jsonResponse({});
     }
-    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note" }));
+    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note", version: "0.3.9" }));
     if (path === "/__internal/provision/reconnect") return new Response(JSON.stringify({ accountId: "historical-account", publishToken: "pn_reconnected" }), { status: 200 });
     if (path.endsWith("/secrets/BOOTSTRAP_SECRET") && method === "DELETE") return jsonResponse({});
     throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
@@ -319,7 +698,7 @@ test("personal deployment creates only the missing resource when a Worker or D1 
         assert.equal(metadata.bindings.find((binding: any) => binding.name === "DB").id, scenario.expectedDatabase, scenario.name);
         return jsonResponse({});
       }
-      if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note" }));
+    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note", version: "0.3.9" }));
       if (path === scenario.initPath) return new Response(JSON.stringify({ accountId: "target-account", publishToken: "pn_personal_token" }), { status: 201 });
       if (path.endsWith("/secrets/BOOTSTRAP_SECRET") && method === "DELETE") return jsonResponse({});
       throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
@@ -402,8 +781,8 @@ test("loopback OAuth callback reports an explicit authorization denial", async (
   const { __testing } = PluginClass;
   const callback = __testing.createLoopbackOAuthCallback("expected-state", 2_000);
   await callback.ready;
-  assert.equal(await requestLoopback("/oauth/callback?error=access_denied&state=expected-state"), 400);
-  await assert.rejects(callback.code, (error: any) => error?.code === "OAUTH_DENIED");
+  assert.equal(await requestLoopback("/oauth/callback?error=access_denied&error_description=User%20denied%20domain%20access&state=expected-state"), 400);
+  await assert.rejects(callback.code, (error: any) => error?.code === "OAUTH_DENIED" && error?.providerCode === "access_denied" && error?.providerMessage === "User denied domain access");
   await callback.closed;
 });
 
@@ -660,7 +1039,7 @@ function provisioningFixture(failStage = "", cleanupFails = false) {
     if (path === "/workers/scripts/publish-note") return ["worker_upload", "unknown_upload"].includes(failStage) ? failure() : jsonResponse({});
     if (path.endsWith("/subdomain")) return failStage === "worker_enable" ? failure() : jsonResponse({ enabled: true });
     if (path.endsWith("/query")) return jsonResponse([{ success: failStage !== "migration" }]);
-    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: failStage === "ready_check" ? "wrong-service" : "publish-note" }));
+    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: failStage === "ready_check" ? "wrong-service" : "publish-note", version: "0.3.9" }));
     if (path === "/__internal/provision/initialize") return failStage === "initialize" ? new Response("Claim consumed", { status: 403 }) : new Response('{"publishToken":"pn_test"}', { status: 201 });
     throw new Error(`Unexpected request: ${method} ${path}`);
   };
@@ -765,11 +1144,52 @@ test("disconnecting stays local, avoids native confirmation, and leaves settings
   assert.equal(plugin.settings.deploymentStatus, "not_deployed");
 });
 
+test("historical Worker versions are detected and publishing is paused until the Worker is updated", async () => {
+  let remoteVersion = "0.3.6";
+  const requests: string[] = [];
+  const { PluginClass, notices } = loadPlugin({ desktop: false, requestImpl: async ({ url, method }) => {
+    requests.push(`${method} ${url}`);
+    assert.equal(method, "GET");
+    assert.ok(url === "https://publish-note.personal-example.workers.dev/healthz");
+    return { status: 200, json: { status: "ok", service: "publish-note", version: remoteVersion } };
+  } });
+  const plugin = new PluginClass({});
+  plugin.data = {
+    ...personalSettings,
+    apiBaseUrl: "https://note.openstaff.dev",
+    deploymentWorkerUrl: "https://publish-note.personal-example.workers.dev",
+    deploymentOriginUrl: "https://publish-note.personal-example.workers.dev",
+    connectionProfiles: JSON.stringify({ self: { serviceUrl: "https://note.openstaff.dev", publishToken: "pn_personal" } }),
+    workerVersion: "",
+    workerVersionStatus: "unknown",
+    workerVersionCheckedAt: 0,
+  };
+  await plugin.loadSettings();
+  const file = { extension: "md", path: "Note.md", basename: "Note" };
+  plugin.app = { vault: { read: async () => "# Note" }, metadataCache: { getFileCache: () => ({ frontmatter: {} }) } };
+  plugin.collectShareNotes = async () => [{ file, sourcePath: file.path, title: file.basename, markdown: "# Note" }];
+  plugin.collectAssets = async () => [];
+  plugin.compileForPublish = async () => ({ formatVersion: 1, sourcePath: "Note.md", title: "Note", pages: [], assets: [] });
+  plugin.publishBundle = async () => { throw new Error("publishBundle must not run for an outdated Worker"); };
+  await plugin.publishFile(file);
+  assert.equal(plugin.settings.workerVersion, remoteVersion);
+  assert.equal(plugin.settings.workerVersionStatus, "outdated");
+  assert.equal(requests.length, 1);
+  assert.match(notices.at(-1) || "", /0\.3\.6/);
+
+  remoteVersion = "0.3.9";
+  const current = await plugin.refreshWorkerVersion({ force: true });
+  assert.equal(current.status, "current");
+  assert.equal(current.version, "0.3.9");
+  assert.equal(plugin.settings.workerVersionStatus, "current");
+});
+
 test("publishing pins one connection across concurrent sync and does not call Cloudflare OAuth", async () => {
   const requests: Array<{ url: string; token: string }> = [];
   let plugin: any;
   const { PluginClass, dependencies } = loadPlugin({ desktop: false, requestImpl: async ({ url, headers }) => {
     requests.push({ url, token: headers.authorization });
+    if (url.endsWith("/healthz")) return { status: 200, json: { status: "ok", service: "publish-note", version: "0.3.9" } };
     assert.ok(url.startsWith("https://personal.example.test/"));
     assert.equal(headers.authorization, "Bearer pn_personal");
     if (url.endsWith("/v1/sites/uploads")) {
@@ -784,7 +1204,7 @@ test("publishing pins one connection across concurrent sync and does not call Cl
   await plugin.loadSettings();
   const result = await plugin.publishBundle({ formatVersion: 1, sourcePath: "test.md", title: "Test", pages: [{ path: "index.html", body: "<h1>Test</h1>", contentType: "text/html", encoding: "utf8" }], assets: [] }, undefined, "test.md");
   assert.equal(result.siteId, "stable");
-  assert.equal(requests.length, 3);
+  assert.equal(requests.filter((request) => request.url.includes("/v1/")).length, 3);
   assert.equal(plugin.settings.publishToken, "pn_other");
   assert.deepEqual(dependencies, ["obsidian"]);
 });

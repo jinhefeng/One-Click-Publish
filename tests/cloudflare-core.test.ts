@@ -145,6 +145,17 @@ test("uploads independent binary base64 chunks, commits atomically, and serves t
   assert.deepEqual([...((viewer?.chunks || []).flatMap((chunk) => [...chunk]))], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
 });
 
+test("uses the request origin when a Worker is reached through a custom domain", async () => {
+  const { service, registered } = await connectedService();
+  const auth = await service.authenticatePublishToken((await service.createToken(registered.account.id)).token);
+  const bundle = compileNote({ sourcePath: "custom-domain.md", markdown: "# Custom domain" });
+  const chunks = createUploadChunks(bundle);
+  const started = await service.startUpload(auth, { idempotencyKey: "custom-domain", formatVersion: 1, chunkProtocolVersion: 2, sourcePath: bundle.sourcePath, title: bundle.title, chunkCount: chunks.length, objectCount: 1, totalBytes: chunks.reduce((total, chunk) => total + chunk.byteLength, 0) });
+  for (const chunk of chunks) await service.uploadChunk(auth, { uploadId: started.uploadId, ...chunk });
+  const result = await service.commitUpload(auth, started.uploadId, "https://notes.example.com");
+  assert.equal(result.url, `https://notes.example.com/s/${result.siteId}`);
+});
+
 test("D1-only storage persists chunks as D1 BLOBs without an R2 binding", async () => {
   const database = createD1OnlyStorage();
   try {
@@ -252,9 +263,9 @@ test("D1 BLOB decoding accepts byte containers but rejects missing or coercible 
   } finally { database.close(); }
 });
 
-test("enforces account quota, note count, and account isolation before writing a revision", async () => {
+test("allows content above the former account quota and preserves account isolation", async () => {
   const storage = new MemoryStorage();
-  const service = new PublishService({ storage, publicBaseUrl: "https://publish.example.com", maxAccountBytes: 10_000, maxSiteCount: 1 });
+  const service = new PublishService({ storage, publicBaseUrl: "https://publish.example.com" });
   const one = await service.register({ email: "one@example.com", password: "correct horse battery" });
   const two = await service.register({ email: "two@example.com", password: "correct horse battery" });
   const oneLogin = await service.login({ email: one.account.email, password: "correct horse battery" });
@@ -263,21 +274,35 @@ test("enforces account quota, note count, and account isolation before writing a
   const twoToken = await service.createToken(two.account.id);
   const oneAuth = await service.authenticatePublishToken(oneToken.token);
   const twoAuth = await service.authenticatePublishToken(twoToken.token);
-  const bundle = compileNote({ sourcePath: "one.md", markdown: "# larger than eight" });
+  const formerAccountQuotaBytes = 50 * 1024 * 1024;
+  const bundle = compileNote({ sourcePath: "one.md", markdown: `# larger than the former quota\n\n${"x".repeat(formerAccountQuotaBytes + 1)}` });
   const chunks = createUploadChunks(bundle);
-  await assert.rejects(() => service.startUpload(oneAuth, { idempotencyKey: "too-big", formatVersion: 1, chunkProtocolVersion: 2, sourcePath: bundle.sourcePath, title: bundle.title, chunkCount: chunks.length, objectCount: 1, totalBytes: 10_001 }), (error) => error instanceof ServiceError && error.code === "QUOTA_EXCEEDED");
+  const start = await service.startUpload(oneAuth, { idempotencyKey: "above-former-quota", formatVersion: 1, chunkProtocolVersion: 2, sourcePath: bundle.sourcePath, title: bundle.title, chunkCount: chunks.length, objectCount: 1, totalBytes: chunks.reduce((total, chunk) => total + chunk.byteLength, 0) });
+  for (const chunk of chunks) await service.uploadChunk(oneAuth, { uploadId: start.uploadId, ...chunk });
+  const first = await service.commitUpload(oneAuth, start.uploadId);
   const small = compileNote({ sourcePath: "one.md", markdown: "x" });
   const smallChunks = createUploadChunks(small);
-  const start = await service.startUpload(oneAuth, { idempotencyKey: "small", formatVersion: 1, chunkProtocolVersion: 2, sourcePath: small.sourcePath, title: small.title, chunkCount: smallChunks.length, objectCount: 1, totalBytes: smallChunks.reduce((total, chunk) => total + chunk.byteLength, 0) });
-  for (const chunk of smallChunks) await service.uploadChunk(oneAuth, { uploadId: start.uploadId, ...chunk });
-  const first = await service.commitUpload(oneAuth, start.uploadId);
-  await assert.rejects(() => service.startUpload(oneAuth, { idempotencyKey: "second-site", formatVersion: 1, chunkProtocolVersion: 2, sourcePath: "second.md", title: "Second", chunkCount: 1, objectCount: 1, totalBytes: 1 }), (error) => error instanceof ServiceError && error.code === "LIMIT_EXCEEDED");
+  const second = await service.startUpload(oneAuth, { idempotencyKey: "second-site", formatVersion: 1, chunkProtocolVersion: 2, sourcePath: "second.md", title: "Second", chunkCount: 1, objectCount: 1, totalBytes: 1 });
+  assert.notEqual(second.siteId, first.siteId);
   await assert.rejects(() => service.startUpload(twoAuth, { siteId: first.siteId, idempotencyKey: "cross-account", formatVersion: 1, chunkProtocolVersion: 2, sourcePath: small.sourcePath, title: small.title, chunkCount: smallChunks.length, objectCount: 1, totalBytes: 1 }), (error) => error instanceof ServiceError && error.status === 404);
   await assert.rejects(() => service.deleteSite(twoLogin, first.siteId), (error) => error instanceof ServiceError && error.status === 404);
   assert.equal((await service.listSites(oneLogin.account.id)).length, 1);
   await service.deleteSite(oneLogin, first.siteId);
   assert.equal((await service.listSites(oneLogin.account.id)).length, 0);
   assert.equal(await service.viewer(first.siteId, "index.html"), undefined);
+});
+
+test("publishes more than ten notes because there is no site-count limit", async () => {
+  const { service, registered } = await connectedService();
+  const auth = await service.authenticatePublishToken((await service.createToken(registered.account.id)).token);
+  for (let index = 1; index <= 11; index += 1) {
+    const bundle = compileNote({ sourcePath: `note-${index}.md`, markdown: `# Note ${index}` });
+    const chunks = createUploadChunks(bundle);
+    const started = await service.startUpload(auth, { idempotencyKey: `no-site-count-limit-${index}`, formatVersion: 1, chunkProtocolVersion: 2, sourcePath: bundle.sourcePath, title: bundle.title, chunkCount: chunks.length, objectCount: 1, totalBytes: chunks.reduce((total, chunk) => total + chunk.byteLength, 0) });
+    for (const chunk of chunks) await service.uploadChunk(auth, { uploadId: started.uploadId, ...chunk });
+    await service.commitUpload(auth, started.uploadId);
+  }
+  assert.equal((await service.listSites(registered.account.id)).length, 11);
 });
 
 test("Worker router returns safe JSON errors and streams viewer chunks", async () => {
@@ -287,7 +312,9 @@ test("Worker router returns safe JSON errors and streams viewer chunks", async (
   assert.deepEqual(await unauthorized.json(), { error: "Sign in required", code: "UNAUTHORIZED" });
   const health = await routeRequest({ service, request: new Request("https://publish.example.com/healthz"), env: {} });
   assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { status: "ok", service: "publish-note", storage: "cloudflare-d1" });
+  assert.deepEqual(await health.json(), { status: "ok", service: "publish-note", version: "unknown", storage: "cloudflare-d1" });
+  const versionedHealth = await routeRequest({ service, request: new Request("https://publish.example.com/healthz"), env: { PUBLISH_NOTE_VERSION: "0.3.8" } });
+  assert.deepEqual(await versionedHealth.json(), { status: "ok", service: "publish-note", version: "0.3.8", storage: "cloudflare-d1" });
   assert.equal(registered.account.email, "owner@example.com");
 });
 

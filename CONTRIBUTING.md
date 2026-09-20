@@ -67,7 +67,7 @@ Do not upload `src/`, `server/`, `tests/`, `plugin/`, or `plugin/compiler.js` as
 
 Every release uses the exact version in `plugin/manifest.json` as an `x.y.z` tag. Do not prefix the tag with `v`.
 
-The workflow in `.github/workflows/plugin-release.yml` validates the repository and creates a GitHub Release with the generated `manifest.json`, `main.js`, and optional `styles.css` assets when an exact SemVer tag is pushed.
+The workflow in `.github/workflows/plugin-release.yml` installs from `package-lock.json`, validates the repository, creates a GitHub artifact attestation for the exact staged release assets, and creates a GitHub Release with the generated `manifest.json`, `main.js`, and optional `styles.css` assets when an exact SemVer tag is pushed.
 
 Before pushing a release:
 
@@ -77,7 +77,7 @@ Before pushing a release:
 4. Confirm root mirrors and release staging are byte-identical to `plugin/` sources.
 5. Push `main`.
 6. Push the matching tag, for example `0.3.0`.
-7. Confirm the GitHub Release contains `manifest.json` and `main.js`.
+7. Confirm the GitHub Release contains `manifest.json` and `main.js`, and that the workflow exposes the corresponding artifact attestation.
 
 Never change the plugin ID after a public release. An ID change creates a different Obsidian plugin and breaks the normal update path.
 

@@ -5,7 +5,6 @@ export type ServiceErrorCode =
   | "NOT_FOUND"
   | "CONFLICT"
   | "QUOTA_EXCEEDED"
-  | "LIMIT_EXCEEDED"
   | "UPLOAD_EXPIRED"
   | "INTERNAL_ERROR";
 

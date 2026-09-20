@@ -23,6 +23,9 @@ jobs:
         with:
           node-version: 26
 
+      - name: Install locked dependencies
+        run: npm ci
+
       - name: Build plugin artifact
         run: npm run build:plugin
 
@@ -45,6 +48,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -54,6 +60,9 @@ jobs:
         with:
           node-version: 26
 
+      - name: Install locked dependencies
+        run: npm ci
+
       - name: Build and stage release assets
         run: |
           npm run build:plugin
@@ -61,6 +70,11 @@ jobs:
           npm run check:plugin
           VERSION=$(node -e "console.log(JSON.parse(require('fs').readFileSync('plugin/manifest.json', 'utf8')).version)")
           test "$VERSION" = "$GITHUB_REF_NAME"
+
+      - name: Attest release assets
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/obsidian-release/*
 
       - name: Publish release assets
         env:

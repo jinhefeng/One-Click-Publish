@@ -6,6 +6,7 @@ export interface WorkerEnv {
   CONTENTS?: ConstructorParameters<typeof CloudflareD1R2Storage>[1];
   BOOTSTRAP_SECRET?: string;
   PUBLIC_BASE_URL?: string;
+  PUBLISH_NOTE_VERSION?: string;
 }
 
 export function createService(env: WorkerEnv, request: Request): PublishService {

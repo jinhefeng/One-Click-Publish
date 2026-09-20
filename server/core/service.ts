@@ -16,8 +16,6 @@ import {
 import type { AccountRecord, CommitUploadInput, DeviceAuthorizationRecord, PublishResultRecord, SessionRecord, SiteRecord, StorageUsage, TokenRecord, UploadRecord } from "./models.ts";
 import type { PublishStorage } from "./storage.ts";
 
-export const MAX_ACCOUNT_BYTES = 50 * 1024 * 1024;
-export const MAX_SITE_COUNT = 10;
 export const UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const DEVICE_TTL_MS = 10 * 60 * 1000;
@@ -26,8 +24,6 @@ export interface ServiceConfig {
   storage: PublishStorage;
   publicBaseUrl?: string;
   bootstrapSecret?: string;
-  maxAccountBytes?: number;
-  maxSiteCount?: number;
   now?: () => Date;
 }
 
@@ -48,16 +44,12 @@ export interface PublishTokenView {
 
 export class PublishService {
   readonly storage: PublishStorage;
-  readonly maxAccountBytes: number;
-  readonly maxSiteCount: number;
   private readonly now: () => Date;
   private readonly publicBaseUrl: string;
   private readonly bootstrapSecret?: string;
 
   constructor(config: ServiceConfig) {
     this.storage = config.storage;
-    this.maxAccountBytes = config.maxAccountBytes ?? MAX_ACCOUNT_BYTES;
-    this.maxSiteCount = config.maxSiteCount ?? MAX_SITE_COUNT;
     this.now = config.now ?? (() => new Date());
     this.publicBaseUrl = String(config.publicBaseUrl || "").replace(/\/$/, "");
     this.bootstrapSecret = config.bootstrapSecret;
@@ -240,10 +232,6 @@ export class PublishService {
     if (existingUpload) return { uploadId: existingUpload.uploadId, siteId: existingUpload.siteId, revision: existingUpload.revision };
     const existingSite = input.siteId ? await this.storage.getSite(context.account.id, input.siteId) : undefined;
     if (input.siteId && !existingSite) throw new ServiceError(404, "NOT_FOUND", "Site not found");
-    const usage = await this.storage.getUsage(context.account.id);
-    const projectedBytes = usage.bytes - (existingSite?.byteSize || 0) + input.totalBytes;
-    if (projectedBytes > this.maxAccountBytes) throw new ServiceError(413, "QUOTA_EXCEEDED", `Account storage quota exceeded (${this.maxAccountBytes} bytes maximum)`);
-    if (!existingSite && usage.siteCount >= this.maxSiteCount) throw new ServiceError(409, "LIMIT_EXCEEDED", `Account site limit exceeded (${this.maxSiteCount} Notes maximum)`);
     const siteId = existingSite?.siteId || randomId(16);
     const revision = (existingSite?.currentRevision || 0) + 1;
     const createdAt = this.currentIso();
@@ -267,9 +255,9 @@ export class PublishService {
     return { uploadId: upload.uploadId, path, chunkIndex: input.chunkIndex, receivedChunks: result.receivedChunks };
   }
 
-  async commitUpload(context: AuthContext, uploadId: string): Promise<{ siteId: string; url: string; revision: number; uploadedPaths: string[] }> {
+  async commitUpload(context: AuthContext, uploadId: string, publicBaseUrl = this.publicBaseUrl): Promise<{ siteId: string; url: string; revision: number; uploadedPaths: string[] }> {
     const upload = await this.authorizedUpload(context, uploadId);
-    if (upload.result) return this.resultFor(upload, upload.result);
+    if (upload.result) return this.resultFor(upload, upload.result, publicBaseUrl);
     if (upload.status !== "open") throw new ServiceError(409, "CONFLICT", "Upload is no longer open");
     const objects = await this.storage.listUploadObjects(upload.uploadId);
     if (objects.length !== upload.expectedObjectCount || objects.length === 0) throw new ServiceError(400, "BAD_REQUEST", "Upload is incomplete");
@@ -286,13 +274,10 @@ export class PublishService {
       if (object.kind === "asset" && object.encoding !== "base64") throw new ServiceError(400, "BAD_REQUEST", "Assets must use base64 chunks");
     }
     if (totalBytes !== upload.declaredBytes) throw new ServiceError(400, "BAD_REQUEST", "Upload byte size does not match the declared total");
-    const current = await this.storage.getSite(context.account.id, upload.siteId);
-    const usage = await this.storage.getUsage(context.account.id);
-    if (usage.bytes - (current?.byteSize || 0) + totalBytes > this.maxAccountBytes) throw new ServiceError(413, "QUOTA_EXCEEDED", `Account storage quota exceeded (${this.maxAccountBytes} bytes maximum)`);
     const input: CommitUploadInput = { byteSize: totalBytes, objectCount: objects.length, now: this.currentIso(), publicBaseUrl: this.publicBaseUrl };
     const site = await this.storage.commitUpload(upload.uploadId, input);
     const result: PublishResultRecord = { siteId: site.siteId, revision: site.currentRevision, uploadedPaths: [...uploadedPaths].sort() };
-    return this.resultFor({ ...upload, result }, result);
+    return this.resultFor({ ...upload, result }, result, publicBaseUrl);
   }
 
   async getUsage(accountId: string): Promise<StorageUsage> { return this.storage.getUsage(accountId); }
@@ -319,8 +304,8 @@ export class PublishService {
     return upload;
   }
 
-  private resultFor(upload: UploadRecord, result: PublishResultRecord) {
-    const base = this.publicBaseUrl || "";
+  private resultFor(upload: UploadRecord, result: PublishResultRecord, publicBaseUrl = this.publicBaseUrl) {
+    const base = String(publicBaseUrl || "").replace(/\/$/, "");
     return { siteId: result.siteId, url: siteUrl(result.siteId, base || "https://share.example.com"), revision: result.revision, uploadedPaths: [...result.uploadedPaths] };
   }
 }

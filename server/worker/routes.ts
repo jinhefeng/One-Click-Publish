@@ -17,7 +17,12 @@ export async function routeRequest(context: WorkerContext): Promise<Response> {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type", "access-control-allow-methods": "GET,POST,DELETE,OPTIONS" } });
 
   try {
-    if (request.method === "GET" && url.pathname === "/healthz") return json({ status: "ok", service: "publish-note", storage: context.env.CONTENTS ? "cloudflare-d1-r2" : "cloudflare-d1" });
+    if (request.method === "GET" && url.pathname === "/healthz") return json({
+      status: "ok",
+      service: "publish-note",
+      version: String(context.env.PUBLISH_NOTE_VERSION || "unknown"),
+      storage: context.env.CONTENTS ? "cloudflare-d1-r2" : "cloudflare-d1",
+    });
     if (url.pathname.startsWith("/s/")) return await viewerResponse(service, request, url);
     if (url.pathname === "/connect" && request.method === "GET") return await connectPage(context);
     if (url.pathname === "/connect/approve" && request.method === "POST") return await approveConnect(context);
@@ -111,7 +116,7 @@ async function apiRequest(context: WorkerContext): Promise<Response> {
   const chunkMatch = /^\/v1\/uploads\/([^/]+)\/chunks$/.exec(url.pathname);
   if (request.method === "POST" && chunkMatch) return json(await service.uploadChunk(token, { ...(await readJson(request)), uploadId: decodeURIComponent(chunkMatch[1]) }));
   const commitMatch = /^\/v1\/uploads\/([^/]+)\/commit$/.exec(url.pathname);
-  if (request.method === "POST" && commitMatch) return json(await service.commitUpload(token, decodeURIComponent(commitMatch[1])));
+  if (request.method === "POST" && commitMatch) return json(await service.commitUpload(token, decodeURIComponent(commitMatch[1]), new URL(request.url).origin));
   throw new ServiceError(404, "NOT_FOUND", "Not found");
 }
 
@@ -204,10 +209,10 @@ async function accountPage(context: WorkerContext): Promise<Response> {
     return html("Sites", `<h1>Published Notes</h1>${sites.map((site) => `<div class="card"><strong>${escapeHtml(site.title)}</strong><br><a href="/s/${encodeURIComponent(site.siteId)}/">${escapeHtml(siteUrlFor(context, site.siteId))}</a><br>Size: ${escapeHtml(site.byteSize)} bytes · Updated: ${escapeHtml(site.updatedAt)}<form method="post" action="/account/sites/${encodeURIComponent(site.siteId)}/delete"><button>Delete site</button></form></div>`).join("") || "<p>No sites yet.</p>"}`, { session: true });
   }
   const usage = await usagePayload(context.service, session.account.id);
-  return html("Usage", `<h1>Usage</h1><p>Account: ${escapeHtml(session.account.email)}</p><div class="card"><strong>${escapeHtml(usage.bytes)} / 52428800 bytes</strong><br>${escapeHtml(usage.siteCount)} / 10 published Notes<br>Service: ${escapeHtml(new URL(context.request.url).origin)}</div><p><a href="/account/tokens">Manage tokens</a> · <a href="/account/sites">Manage sites</a></p>`, { session: true });
+  return html("Usage", `<h1>Usage</h1><p>Account: ${escapeHtml(session.account.email)}</p><div class="card"><strong>${escapeHtml(usage.bytes)} bytes in current published content</strong><br>${escapeHtml(usage.siteCount)} published Notes<br>Service: ${escapeHtml(new URL(context.request.url).origin)}</div><p><a href="/account/tokens">Manage tokens</a> · <a href="/account/sites">Manage sites</a></p>`, { session: true });
 }
 
-async function usagePayload(service: PublishService, accountId: string) { const usage = await service.getUsage(accountId); return { ...usage, maxBytes: service.maxAccountBytes, maxSites: service.maxSiteCount, sites: await service.listSites(accountId) }; }
+async function usagePayload(service: PublishService, accountId: string) { const usage = await service.getUsage(accountId); return { ...usage, sites: await service.listSites(accountId) }; }
 function siteUrlFor(context: WorkerContext, siteId: string) { return `${new URL(context.request.url).origin}/s/${encodeURIComponent(siteId)}/`; }
 function publicAccount(account: { id: string; email: string; createdAt: string }) { return { id: account.id, email: account.email, createdAt: account.createdAt }; }
 function json(value: unknown, status = 200): Response { return new Response(JSON.stringify(value), { status, headers: JSON_HEADERS }); }

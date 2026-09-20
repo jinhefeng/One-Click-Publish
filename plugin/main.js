@@ -146,6 +146,7 @@ const CLOUDFLARE_OAUTH_BASE_URL = "https://dash.cloudflare.com";
 const CLOUDFLARE_OAUTH_CLIENT_ID = "be8c51bb93410da71562848331e34657";
 const CLOUDFLARE_OAUTH_REDIRECT_URI = "http://127.0.0.1:8976/oauth/callback";
 const CLOUDFLARE_OAUTH_SCOPE = "account-settings.read workers-scripts.write d1.write";
+const CLOUDFLARE_DOMAIN_OAUTH_SCOPE = "account-settings.read workers-scripts.write workers-routes.write zone.read";
 const CLOUDFLARE_OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const CLOUDFLARE_BOOTSTRAP_TIMEOUT_MS = 5 * 60 * 1000;
 const CLOUDFLARE_RESOURCE_PREFIX = "publish-note";
@@ -157,9 +158,9 @@ const uploadTextEncoder = typeof TextEncoder === "function"
   : { encode(value) { const bytes = []; for (const character of value) { const encoded = encodeURIComponent(character); if (encoded.startsWith("%")) { for (const part of encoded.slice(1).split("%")) bytes.push(Number.parseInt(part, 16)); } else bytes.push(character.charCodeAt(0)); } return Uint8Array.from(bytes); } };
 
 // Replaced by scripts/build-plugin.mjs so the released plugin stays self-contained.
-const EMBEDDED_TARGET_PLUGIN_VERSION = "0.3.1";
-const EMBEDDED_TARGET_ARTIFACT_HASH = "054bf3d92820200f";
-const EMBEDDED_TARGET_WORKER_MODULE = "// src/shared/paths.ts\nfunction normalizeRelativePath(input) {\n  const normalized = input.replaceAll(\"\\\\\", \"/\").replace(/^\\/+/, \"\");\n  if (!normalized || normalized === \".\") {\n    return \"index.html\";\n  }\n  const parts = normalized.split(\"/\");\n  if (parts.some((part) => part === \"..\" || part === \".\" || part === \"\")) {\n    throw new Error(`Invalid relative path: ${input}`);\n  }\n  return parts.join(\"/\");\n}\nfunction siteUrl(siteId, baseUrl = \"https://share.example.com\") {\n  return `${baseUrl.replace(/\\/$/, \"\")}/s/${encodeURIComponent(siteId)}`;\n}\nfunction viewerPath(siteId, requestPath) {\n  const prefix = `/s/${encodeURIComponent(siteId)}`;\n  const withoutPrefix = requestPath.startsWith(prefix) ? requestPath.slice(prefix.length) : requestPath;\n  let path = withoutPrefix.replace(/^\\/+/, \"\");\n  try {\n    path = decodeURIComponent(path);\n  } catch {\n  }\n  return normalizeRelativePath(path || \"index.html\");\n}\n\n// server/core/errors.ts\nvar ServiceError = class extends Error {\n  status;\n  code;\n  constructor(status, code, message) {\n    super(message);\n    this.name = \"ServiceError\";\n    this.status = status;\n    this.code = code;\n  }\n};\nfunction asServiceError(error) {\n  if (error instanceof ServiceError) return error;\n  return new ServiceError(400, \"BAD_REQUEST\", error instanceof Error ? error.message : \"Bad request\");\n}\nfunction jsonError(error) {\n  const normalized = asServiceError(error);\n  const safeMessage = normalized.status >= 500 ? \"Internal server error\" : normalized.message;\n  return new Response(JSON.stringify({ error: safeMessage, code: normalized.code }), {\n    status: normalized.status,\n    headers: { \"content-type\": \"application/json; charset=utf-8\" }\n  });\n}\n\n// server/core/crypto.ts\nfunction runtimeCrypto() {\n  const value = globalThis.crypto;\n  if (!value?.subtle || !value?.getRandomValues) throw new Error(\"Web Crypto is unavailable\");\n  return value;\n}\nfunction randomId(byteLength = 18) {\n  const bytes = new Uint8Array(byteLength);\n  runtimeCrypto().getRandomValues(bytes);\n  let binary = \"\";\n  for (const byte of bytes) binary += String.fromCharCode(byte);\n  return btoa(binary).replaceAll(\"+\", \"-\").replaceAll(\"/\", \"_\").replace(/=+$/, \"\");\n}\nfunction randomSecret(prefix = \"\", byteLength = 32) {\n  return `${prefix}${randomId(byteLength)}`;\n}\nasync function sha256(value) {\n  const bytes = new TextEncoder().encode(value);\n  const digest = new Uint8Array(await runtimeCrypto().subtle.digest(\"SHA-256\", bytes));\n  let binary = \"\";\n  for (const byte of digest) binary += String.fromCharCode(byte);\n  return btoa(binary).replaceAll(\"+\", \"-\").replaceAll(\"/\", \"_\").replace(/=+$/, \"\");\n}\nasync function hmacSha256(secret, value) {\n  const crypto = runtimeCrypto();\n  const key = await crypto.subtle.importKey(\"raw\", new TextEncoder().encode(secret), { name: \"HMAC\", hash: \"SHA-256\" }, false, [\"sign\"]);\n  const signature = new Uint8Array(await crypto.subtle.sign(\"HMAC\", key, new TextEncoder().encode(value)));\n  let binary = \"\";\n  for (const byte of signature) binary += String.fromCharCode(byte);\n  return btoa(binary).replaceAll(\"+\", \"-\").replaceAll(\"/\", \"_\").replace(/=+$/, \"\");\n}\nvar MAX_PBKDF2_ITERATIONS = 1e5;\nasync function hashPassword(password, salt = randomSecret(\"\", 16), iterations = MAX_PBKDF2_ITERATIONS) {\n  const crypto = runtimeCrypto();\n  const key = await crypto.subtle.importKey(\"raw\", new TextEncoder().encode(password), \"PBKDF2\", false, [\"deriveBits\"]);\n  const bits = await crypto.subtle.deriveBits({ name: \"PBKDF2\", salt: new TextEncoder().encode(salt), iterations, hash: \"SHA-256\" }, key, 256);\n  let binary = \"\";\n  for (const byte of new Uint8Array(bits)) binary += String.fromCharCode(byte);\n  return `pbkdf2$${iterations}$${salt}$${btoa(binary)}`;\n}\nasync function verifyPassword(password, stored) {\n  const [scheme, iterationText, salt, expected] = stored.split(\"$\");\n  const iterations = Number(iterationText);\n  if (scheme !== \"pbkdf2\" || !iterationText || !salt || !expected || !Number.isInteger(iterations) || iterations < 1 || iterations > MAX_PBKDF2_ITERATIONS) return false;\n  const actual = await hashPassword(password, salt, iterations);\n  return constantTimeEqual(actual, stored);\n}\nfunction constantTimeEqual(left, right) {\n  if (left.length !== right.length) return false;\n  let different = 0;\n  for (let index = 0; index < left.length; index += 1) different |= left.charCodeAt(index) ^ right.charCodeAt(index);\n  return different === 0;\n}\nfunction normalizeEmail(email) {\n  return String(email || \"\").trim().toLowerCase();\n}\nfunction normalizePassword(password) {\n  return String(password || \"\");\n}\nfunction normalizeTokenName(name) {\n  return String(name || \"\").trim().slice(0, 100) || \"Obsidian plugin\";\n}\nfunction recoveryCode() {\n  const value = randomId(12).toUpperCase();\n  return `${value.slice(0, 4)}-${value.slice(4, 8)}-${value.slice(8, 12)}`;\n}\n\n// server/core/service.ts\nvar MAX_ACCOUNT_BYTES = 50 * 1024 * 1024;\nvar MAX_SITE_COUNT = 10;\nvar UPLOAD_TTL_MS = 24 * 60 * 60 * 1e3;\nvar SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1e3;\nvar DEVICE_TTL_MS = 10 * 60 * 1e3;\nvar PublishService = class {\n  storage;\n  maxAccountBytes;\n  maxSiteCount;\n  now;\n  publicBaseUrl;\n  bootstrapSecret;\n  constructor(config) {\n    this.storage = config.storage;\n    this.maxAccountBytes = config.maxAccountBytes ?? MAX_ACCOUNT_BYTES;\n    this.maxSiteCount = config.maxSiteCount ?? MAX_SITE_COUNT;\n    this.now = config.now ?? (() => /* @__PURE__ */ new Date());\n    this.publicBaseUrl = String(config.publicBaseUrl || \"\").replace(/\\/$/, \"\");\n    this.bootstrapSecret = config.bootstrapSecret;\n  }\n  currentIso() {\n    return this.now().toISOString();\n  }\n  async register(input) {\n    const email = normalizeEmail(input.email);\n    const password = normalizePassword(input.password);\n    validateEmail(email);\n    validatePassword(password);\n    if (await this.storage.getAccountByEmail(email)) throw new ServiceError(409, \"CONFLICT\", \"Registration unavailable\");\n    const account = { id: randomId(18), email, passwordHash: await hashPassword(password), createdAt: this.currentIso() };\n    const plainRecoveryCode = recoveryCode();\n    const recovery = { id: randomId(16), accountId: account.id, codeHash: await sha256(plainRecoveryCode), createdAt: account.createdAt };\n    await this.storage.createAccount(account, recovery);\n    return { account, recoveryCode: plainRecoveryCode };\n  }\n  async login(input) {\n    const account = await this.storage.getAccountByEmail(normalizeEmail(input.email));\n    if (!account || !await verifyPassword(normalizePassword(input.password), account.passwordHash)) {\n      throw new ServiceError(401, \"UNAUTHORIZED\", \"Invalid email or password\");\n    }\n    const session = {\n      id: randomSecret(\"\", 32),\n      accountId: account.id,\n      createdAt: this.currentIso(),\n      expiresAt: new Date(this.now().getTime() + SESSION_TTL_MS).toISOString()\n    };\n    await this.storage.createSession(session);\n    return { account, session };\n  }\n  async accountForSession(sessionId) {\n    if (!sessionId) return void 0;\n    const session = await this.storage.getSession(sessionId);\n    if (!session) return void 0;\n    if (Date.parse(session.expiresAt) <= this.now().getTime()) {\n      await this.storage.deleteSession(session.id);\n      return void 0;\n    }\n    const account = await this.storage.getAccount(session.accountId);\n    return account ? { account } : void 0;\n  }\n  async logout(sessionId) {\n    if (sessionId) await this.storage.deleteSession(sessionId);\n  }\n  async recover(input) {\n    const account = await this.storage.getAccountByEmail(normalizeEmail(input.email));\n    const newPassword = normalizePassword(input.newPassword);\n    validatePassword(newPassword);\n    if (!account) throw new ServiceError(401, \"UNAUTHORIZED\", \"Recovery failed\");\n    const codeHash = await sha256(String(input.recoveryCode || \"\").trim().toUpperCase());\n    const consumed = await this.storage.consumeRecoveryCode(account.id, codeHash, this.currentIso());\n    if (!consumed) throw new ServiceError(401, \"UNAUTHORIZED\", \"Recovery failed\");\n    await this.storage.updateAccountPassword(account.id, await hashPassword(newPassword));\n    await this.storage.revokeAccountSessions(account.id);\n    await this.storage.revokeAccountTokens(account.id, this.currentIso());\n  }\n  async authenticatePublishToken(value) {\n    const token = String(value || \"\");\n    if (!token.startsWith(\"pn_\")) throw new ServiceError(401, \"UNAUTHORIZED\", \"Unauthorized\");\n    const record = await this.storage.getTokenByHash(await sha256(token));\n    if (!record || record.revokedAt || record.expiresAt && Date.parse(record.expiresAt) <= this.now().getTime()) {\n      throw new ServiceError(401, \"UNAUTHORIZED\", \"Unauthorized\");\n    }\n    const account = await this.storage.getAccount(record.accountId);\n    if (!account) throw new ServiceError(401, \"UNAUTHORIZED\", \"Unauthorized\");\n    await this.storage.touchToken(record.id, this.currentIso());\n    return { account, token: record };\n  }\n  async createToken(accountId, name = \"Obsidian plugin\", expiresAt) {\n    const account = await this.storage.getAccount(accountId);\n    if (!account) throw new ServiceError(401, \"UNAUTHORIZED\", \"Unauthorized\");\n    if (expiresAt && !Number.isFinite(Date.parse(expiresAt))) throw new ServiceError(400, \"BAD_REQUEST\", \"Invalid token expiry\");\n    const token = randomSecret(\"pn_\", 32);\n    const record = {\n      id: randomId(16),\n      accountId,\n      name: normalizeTokenName(name),\n      tokenHash: await sha256(token),\n      scope: \"publish:write\",\n      createdAt: this.currentIso(),\n      expiresAt\n    };\n    await this.storage.createToken(record);\n    return { token, view: tokenView(record) };\n  }\n  async listTokens(context) {\n    return (await this.storage.listTokens(context.account.id)).map(tokenView);\n  }\n  async revokeToken(context, tokenId) {\n    if (!await this.storage.revokeToken(context.account.id, tokenId, this.currentIso())) throw new ServiceError(404, \"NOT_FOUND\", \"Token not found\");\n  }\n  async startDeviceAuthorization() {\n    const deviceCode = randomSecret(\"\", 24);\n    const createdAt = this.currentIso();\n    const expiresAt = new Date(this.now().getTime() + DEVICE_TTL_MS).toISOString();\n    const record = { id: randomId(16), deviceCodeHash: await sha256(deviceCode), status: \"pending\", createdAt, expiresAt };\n    await this.storage.createDeviceAuthorization(record);\n    return { deviceCode, verificationUrl: `${this.publicBaseUrl}/connect?code=${encodeURIComponent(deviceCode)}`, expiresIn: DEVICE_TTL_MS / 1e3, interval: 2 };\n  }\n  async approveDeviceAuthorization(context, deviceCode, tokenName) {\n    const hash = await sha256(String(deviceCode || \"\"));\n    const ok = await this.storage.approveDeviceAuthorization(hash, context.account.id, \"\", normalizeTokenName(tokenName || \"Obsidian plugin\"), this.currentIso());\n    if (!ok) throw new ServiceError(400, \"BAD_REQUEST\", \"Device code is invalid, expired, or already used\");\n  }\n  async pollDeviceAuthorization(deviceCode) {\n    const hash = await sha256(String(deviceCode || \"\"));\n    const current = await this.storage.getDeviceAuthorization(hash);\n    if (!current) return { status: \"expired\" };\n    if (Date.parse(current.expiresAt) <= this.now().getTime()) return { status: \"expired\" };\n    if (current.status !== \"approved\") return { status: current.status };\n    const approved = await this.storage.consumeApprovedDeviceAuthorization(hash);\n    if (!approved?.accountId) return { status: approved?.status || \"expired\" };\n    const issued = await this.createToken(approved.accountId, approved.tokenName || \"Obsidian plugin\");\n    return { status: \"approved\", publishToken: issued.token };\n  }\n  async setup(input) {\n    if (!this.bootstrapSecret || input.bootstrapSecret !== this.bootstrapSecret || await this.storage.isBootstrapConsumed()) {\n      throw new ServiceError(403, \"FORBIDDEN\", \"Bootstrap is unavailable\");\n    }\n    const result = await this.register({ email: input.email, password: input.password });\n    if (!await this.storage.consumeBootstrap(this.currentIso())) {\n      await this.storage.deleteAccount(result.account.id);\n      throw new ServiceError(409, \"CONFLICT\", \"Bootstrap is unavailable\");\n    }\n    return result;\n  }\n  async initializeProvisioning(input) {\n    const expiresAt = Date.parse(String(input.expiresAt || \"\"));\n    if (!this.bootstrapSecret || input.provisionSecret !== this.bootstrapSecret || await this.storage.isBootstrapConsumed() || !Number.isFinite(expiresAt) || expiresAt <= this.now().getTime() || expiresAt > this.now().getTime() + 10 * 60 * 1e3) {\n      throw new ServiceError(403, \"FORBIDDEN\", \"Provisioning is unavailable\");\n    }\n    const ownerKey = String(input.ownerKey || \"\").trim();\n    if (!ownerKey || !input.signature || !constantTimeEqual(await hmacSha256(this.bootstrapSecret, `${ownerKey}\n${input.expiresAt}`), String(input.signature))) {\n      throw new ServiceError(403, \"FORBIDDEN\", \"Provisioning is unavailable\");\n    }\n    const suffix = ownerKey.replace(/[^A-Za-z0-9_-]/g, \"\").slice(0, 48) || randomId(8);\n    const email = `owner-${suffix}@selfhosted.publish-note.invalid`;\n    const password = randomSecret(\"\", 32);\n    const result = await this.register({ email, password });\n    const issued = await this.createToken(result.account.id, input.tokenName || \"Obsidian plugin\");\n    if (!await this.storage.consumeBootstrap(this.currentIso())) {\n      await this.storage.deleteAccount(result.account.id);\n      throw new ServiceError(409, \"CONFLICT\", \"Provisioning is unavailable\");\n    }\n    return { accountId: result.account.id, publishToken: issued.token };\n  }\n  async reconnectProvisioning(input) {\n    const expiresAt = Date.parse(String(input.expiresAt || \"\"));\n    if (!this.bootstrapSecret || input.provisionSecret !== this.bootstrapSecret || !await this.storage.isBootstrapConsumed() || !Number.isFinite(expiresAt) || expiresAt <= this.now().getTime() || expiresAt > this.now().getTime() + 10 * 60 * 1e3) {\n      throw new ServiceError(403, \"FORBIDDEN\", \"Reconnection is unavailable\");\n    }\n    const ownerKey = String(input.ownerKey || \"\").trim();\n    if (!ownerKey || !input.signature || !constantTimeEqual(await hmacSha256(this.bootstrapSecret, `${ownerKey}\n${input.expiresAt}`), String(input.signature))) {\n      throw new ServiceError(403, \"FORBIDDEN\", \"Reconnection is unavailable\");\n    }\n    const account = await this.storage.findProvisioningAccount();\n    if (!account) throw new ServiceError(404, \"NOT_FOUND\", \"Reconnection account is unavailable\");\n    const issued = await this.createToken(account.id, input.tokenName || \"Obsidian plugin\");\n    return { accountId: account.id, publishToken: issued.token };\n  }\n  async startUpload(context, input) {\n    validateUploadStart(input);\n    const existingUpload = await this.storage.findUpload(context.account.id, input.idempotencyKey);\n    if (existingUpload) return { uploadId: existingUpload.uploadId, siteId: existingUpload.siteId, revision: existingUpload.revision };\n    const existingSite = input.siteId ? await this.storage.getSite(context.account.id, input.siteId) : void 0;\n    if (input.siteId && !existingSite) throw new ServiceError(404, \"NOT_FOUND\", \"Site not found\");\n    const usage = await this.storage.getUsage(context.account.id);\n    const projectedBytes = usage.bytes - (existingSite?.byteSize || 0) + input.totalBytes;\n    if (projectedBytes > this.maxAccountBytes) throw new ServiceError(413, \"QUOTA_EXCEEDED\", `Account storage quota exceeded (${this.maxAccountBytes} bytes maximum)`);\n    if (!existingSite && usage.siteCount >= this.maxSiteCount) throw new ServiceError(409, \"LIMIT_EXCEEDED\", `Account site limit exceeded (${this.maxSiteCount} Notes maximum)`);\n    const siteId = existingSite?.siteId || randomId(16);\n    const revision = (existingSite?.currentRevision || 0) + 1;\n    const createdAt = this.currentIso();\n    const upload = {\n      uploadId: randomId(18),\n      accountId: context.account.id,\n      siteId,\n      revision,\n      sourcePath: String(input.sourcePath),\n      title: String(input.title),\n      idempotencyKey: input.idempotencyKey,\n      formatVersion: 1,\n      chunkProtocolVersion: 2,\n      expectedChunkCount: input.chunkCount,\n      expectedObjectCount: input.objectCount,\n      declaredBytes: input.totalBytes,\n      status: \"open\",\n      createdAt,\n      expiresAt: new Date(this.now().getTime() + UPLOAD_TTL_MS).toISOString()\n    };\n    await this.storage.createUpload(upload);\n    return { uploadId: upload.uploadId, siteId, revision };\n  }\n  async uploadChunk(context, input) {\n    const upload = await this.authorizedUpload(context, input.uploadId);\n    if (upload.status !== \"open\") throw new ServiceError(409, \"CONFLICT\", \"Upload is no longer open\");\n    validateChunk(input);\n    const path = normalizeRelativePath(input.path);\n    const bytes = decodeChunk(input.encoding, input.body);\n    if (bytes.byteLength !== input.byteLength) throw new ServiceError(400, \"BAD_REQUEST\", \"Upload chunk byteLength does not match body\");\n    const result = await this.storage.putUploadChunk({ upload, object: { kind: input.kind, path, contentType: input.contentType, encoding: input.encoding, chunkCount: input.chunkCount }, chunkIndex: input.chunkIndex, byteLength: input.byteLength, bytes });\n    return { uploadId: upload.uploadId, path, chunkIndex: input.chunkIndex, receivedChunks: result.receivedChunks };\n  }\n  async commitUpload(context, uploadId) {\n    const upload = await this.authorizedUpload(context, uploadId);\n    if (upload.result) return this.resultFor(upload, upload.result);\n    if (upload.status !== \"open\") throw new ServiceError(409, \"CONFLICT\", \"Upload is no longer open\");\n    const objects = await this.storage.listUploadObjects(upload.uploadId);\n    if (objects.length !== upload.expectedObjectCount || objects.length === 0) throw new ServiceError(400, \"BAD_REQUEST\", \"Upload is incomplete\");\n    let totalBytes = 0;\n    const uploadedPaths = [];\n    for (const object of objects) {\n      const chunks = await this.storage.listUploadChunks(upload.uploadId, object.objectId);\n      if (chunks.length !== object.chunkCount || chunks.some((chunk, index) => chunk.chunkIndex !== index)) throw new ServiceError(400, \"BAD_REQUEST\", `Upload object is incomplete: ${object.path}`);\n      const byteSize = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);\n      if (byteSize !== object.byteSize) throw new ServiceError(400, \"BAD_REQUEST\", `Upload object size mismatch: ${object.path}`);\n      totalBytes += byteSize;\n      uploadedPaths.push(object.path);\n      if (object.kind === \"page\" && object.encoding !== \"utf8\") throw new ServiceError(400, \"BAD_REQUEST\", \"Pages must use UTF-8 chunks\");\n      if (object.kind === \"asset\" && object.encoding !== \"base64\") throw new ServiceError(400, \"BAD_REQUEST\", \"Assets must use base64 chunks\");\n    }\n    if (totalBytes !== upload.declaredBytes) throw new ServiceError(400, \"BAD_REQUEST\", \"Upload byte size does not match the declared total\");\n    const current = await this.storage.getSite(context.account.id, upload.siteId);\n    const usage = await this.storage.getUsage(context.account.id);\n    if (usage.bytes - (current?.byteSize || 0) + totalBytes > this.maxAccountBytes) throw new ServiceError(413, \"QUOTA_EXCEEDED\", `Account storage quota exceeded (${this.maxAccountBytes} bytes maximum)`);\n    const input = { byteSize: totalBytes, objectCount: objects.length, now: this.currentIso(), publicBaseUrl: this.publicBaseUrl };\n    const site = await this.storage.commitUpload(upload.uploadId, input);\n    const result = { siteId: site.siteId, revision: site.currentRevision, uploadedPaths: [...uploadedPaths].sort() };\n    return this.resultFor({ ...upload, result }, result);\n  }\n  async getUsage(accountId) {\n    return this.storage.getUsage(accountId);\n  }\n  async listSites(accountId) {\n    return this.storage.listSites(accountId);\n  }\n  async deleteSite(context, siteId) {\n    if (!await this.storage.deleteSite(context.account.id, siteId)) throw new ServiceError(404, \"NOT_FOUND\", \"Site not found\");\n  }\n  async viewer(siteId, path) {\n    return this.storage.getViewerObject(siteId, normalizeRelativePath(path || \"index.html\"));\n  }\n  async cleanup() {\n    const now = this.currentIso();\n    return { uploads: await this.storage.expireUploads(now), objects: await this.storage.cleanupOrphanedObjects(now) };\n  }\n  bootstrapConfigured() {\n    return Boolean(this.bootstrapSecret);\n  }\n  async authorizedUpload(context, uploadId) {\n    const upload = await this.storage.getUpload(uploadId);\n    if (!upload || upload.accountId !== context.account.id) throw new ServiceError(404, \"NOT_FOUND\", \"Upload not found\");\n    if (Date.parse(upload.expiresAt) <= this.now().getTime() && upload.status === \"open\") throw new ServiceError(410, \"UPLOAD_EXPIRED\", \"Upload session expired\");\n    return upload;\n  }\n  resultFor(upload, result) {\n    const base = this.publicBaseUrl || \"\";\n    return { siteId: result.siteId, url: siteUrl(result.siteId, base || \"https://share.example.com\"), revision: result.revision, uploadedPaths: [...result.uploadedPaths] };\n  }\n};\nfunction tokenView(token) {\n  return { id: token.id, name: token.name, scope: token.scope, createdAt: token.createdAt, lastUsedAt: token.lastUsedAt, expiresAt: token.expiresAt, revokedAt: token.revokedAt };\n}\nfunction validateEmail(email) {\n  if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email) || email.length > 320) throw new ServiceError(400, \"BAD_REQUEST\", \"A valid email is required\");\n}\nfunction validatePassword(password) {\n  if (password.length < 10 || password.length > 200) throw new ServiceError(400, \"BAD_REQUEST\", \"Password must be 10 to 200 characters\");\n}\nfunction validateUploadStart(input) {\n  if (input.chunkProtocolVersion !== 2 || !String(input.sourcePath || \"\").trim() || !String(input.title || \"\").trim() || !String(input.idempotencyKey || \"\").trim()) throw new ServiceError(400, \"BAD_REQUEST\", \"Invalid upload metadata\");\n  if (!Number.isInteger(input.chunkCount) || input.chunkCount < 1 || !Number.isInteger(input.objectCount) || input.objectCount < 1 || !Number.isInteger(input.totalBytes) || input.totalBytes < 1) throw new ServiceError(400, \"BAD_REQUEST\", \"Invalid upload sizes\");\n}\nfunction validateChunk(input) {\n  if (input.chunkProtocolVersion !== 2 || ![\"page\", \"asset\"].includes(input.kind) || ![\"utf8\", \"base64\"].includes(input.encoding)) throw new ServiceError(400, \"BAD_REQUEST\", \"Invalid upload chunk metadata\");\n  if (!Number.isInteger(input.chunkIndex) || input.chunkIndex < 0 || !Number.isInteger(input.chunkCount) || input.chunkCount < 1 || input.chunkIndex >= input.chunkCount || !Number.isInteger(input.byteLength) || input.byteLength < 0 || typeof input.body !== \"string\") throw new ServiceError(400, \"BAD_REQUEST\", \"Invalid upload chunk\");\n}\nfunction decodeChunk(encoding, body) {\n  if (encoding === \"utf8\") return new TextEncoder().encode(body);\n  try {\n    const binary = atob(body);\n    return Uint8Array.from(binary, (character) => character.charCodeAt(0));\n  } catch {\n    throw new ServiceError(400, \"BAD_REQUEST\", \"Binary asset chunk is not valid base64\");\n  }\n}\n\n// server/storage/cloudflare-d1-r2/index.ts\nvar D1_ONLY_MAX_OBJECT_BYTES = 2e7;\nvar CloudflareD1R2Storage = class {\n  db;\n  bucket;\n  tenantId;\n  constructor(db, bucket, tenantId = \"default\") {\n    this.db = db;\n    this.bucket = bucket;\n    this.tenantId = tenantId;\n  }\n  async getAccountByEmail(email) {\n    return this.account(await this.db.prepare(\"SELECT * FROM accounts WHERE email = ?1\").bind(email).first());\n  }\n  async getAccount(accountId) {\n    return this.account(await this.db.prepare(\"SELECT * FROM accounts WHERE id = ?1\").bind(accountId).first());\n  }\n  async findProvisioningAccount() {\n    return this.account(await this.db.prepare(\"SELECT * FROM accounts WHERE email LIKE ?1 ORDER BY created_at ASC LIMIT 1\").bind(\"%@selfhosted.publish-note.invalid\").first());\n  }\n  async createAccount(account, recoveryCode2) {\n    await this.db.batch([\n      this.db.prepare(\"INSERT INTO accounts(id,email,password_hash,created_at) VALUES (?1,?2,?3,?4)\").bind(account.id, account.email, account.passwordHash, account.createdAt),\n      this.db.prepare(\"INSERT INTO recovery_codes(id,account_id,code_hash,created_at) VALUES (?1,?2,?3,?4)\").bind(recoveryCode2.id, recoveryCode2.accountId, recoveryCode2.codeHash, recoveryCode2.createdAt)\n    ]);\n  }\n  async deleteAccount(accountId) {\n    await this.db.prepare(\"DELETE FROM accounts WHERE id = ?1\").bind(accountId).run();\n  }\n  async updateAccountPassword(accountId, passwordHash) {\n    await this.db.prepare(\"UPDATE accounts SET password_hash = ?1 WHERE id = ?2\").bind(passwordHash, accountId).run();\n  }\n  async getRecoveryCode(accountId) {\n    return this.recovery(await this.db.prepare(\"SELECT * FROM recovery_codes WHERE account_id = ?1\").bind(accountId).first());\n  }\n  async consumeRecoveryCode(accountId, codeHash, usedAt) {\n    const result = await this.db.prepare(\"UPDATE recovery_codes SET used_at = ?1 WHERE account_id = ?2 AND code_hash = ?3 AND used_at IS NULL\").bind(usedAt, accountId, codeHash).run();\n    return Number(result.meta?.changes || 0) === 1;\n  }\n  async createSession(session) {\n    await this.db.prepare(\"INSERT INTO sessions(id,account_id,created_at,expires_at) VALUES (?1,?2,?3,?4)\").bind(session.id, session.accountId, session.createdAt, session.expiresAt).run();\n  }\n  async getSession(sessionId) {\n    return this.session(await this.db.prepare(\"SELECT * FROM sessions WHERE id = ?1\").bind(sessionId).first());\n  }\n  async deleteSession(sessionId) {\n    await this.db.prepare(\"DELETE FROM sessions WHERE id = ?1\").bind(sessionId).run();\n  }\n  async revokeAccountSessions(accountId) {\n    await this.db.prepare(\"DELETE FROM sessions WHERE account_id = ?1\").bind(accountId).run();\n  }\n  async createToken(token) {\n    await this.db.prepare(\"INSERT INTO tokens(id,account_id,name,token_hash,scope,created_at,last_used_at,expires_at,revoked_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)\").bind(token.id, token.accountId, token.name, token.tokenHash, token.scope, token.createdAt, token.lastUsedAt || null, token.expiresAt || null, token.revokedAt || null).run();\n  }\n  async getTokenByHash(tokenHash) {\n    return this.token(await this.db.prepare(\"SELECT * FROM tokens WHERE token_hash = ?1\").bind(tokenHash).first());\n  }\n  async listTokens(accountId) {\n    const result = await this.db.prepare(\"SELECT * FROM tokens WHERE account_id = ?1 ORDER BY created_at DESC\").bind(accountId).all();\n    return (result.results || []).map((row) => this.token(row));\n  }\n  async revokeToken(accountId, tokenId, revokedAt) {\n    const result = await this.db.prepare(\"UPDATE tokens SET revoked_at = COALESCE(revoked_at, ?1) WHERE id = ?2 AND account_id = ?3\").bind(revokedAt, tokenId, accountId).run();\n    return Number(result.meta?.changes || 0) === 1;\n  }\n  async touchToken(tokenId, usedAt) {\n    await this.db.prepare(\"UPDATE tokens SET last_used_at = ?1 WHERE id = ?2\").bind(usedAt, tokenId).run();\n  }\n  async revokeAccountTokens(accountId, revokedAt) {\n    await this.db.prepare(\"UPDATE tokens SET revoked_at = COALESCE(revoked_at, ?1) WHERE account_id = ?2\").bind(revokedAt, accountId).run();\n  }\n  async getSite(accountId, siteId) {\n    return this.site(await this.db.prepare(\"SELECT * FROM sites WHERE account_id = ?1 AND site_id = ?2\").bind(accountId, siteId).first());\n  }\n  async listSites(accountId) {\n    const result = await this.db.prepare(\"SELECT * FROM sites WHERE account_id = ?1 ORDER BY updated_at DESC\").bind(accountId).all();\n    return (result.results || []).map((row) => this.site(row));\n  }\n  async getUsage(accountId) {\n    const row = await this.db.prepare(\"SELECT COALESCE(SUM(byte_size),0) AS bytes, COUNT(*) AS site_count FROM sites WHERE account_id = ?1\").bind(accountId).first();\n    return { bytes: Number(row?.bytes || 0), siteCount: Number(row?.site_count || 0) };\n  }\n  async deleteSite(accountId, siteId) {\n    const site = await this.getSite(accountId, siteId);\n    if (!site) return false;\n    const keys = await this.db.prepare(\"SELECT r2_key FROM object_chunks WHERE site_id = ?1\").bind(siteId).all();\n    const uploadKeys = await this.db.prepare(\"SELECT uc.r2_key FROM upload_chunks uc JOIN uploads u ON u.upload_id = uc.upload_id WHERE u.account_id = ?1 AND u.site_id = ?2\").bind(accountId, siteId).all();\n    await this.db.batch([\n      this.db.prepare(\"DELETE FROM object_chunks WHERE site_id = ?1\").bind(siteId),\n      this.db.prepare(\"DELETE FROM objects WHERE site_id = ?1\").bind(siteId),\n      this.db.prepare(\"DELETE FROM revisions WHERE site_id = ?1\").bind(siteId),\n      this.db.prepare(\"DELETE FROM uploads WHERE account_id = ?1 AND site_id = ?2\").bind(accountId, siteId),\n      this.db.prepare(\"DELETE FROM sites WHERE account_id = ?1 AND site_id = ?2\").bind(accountId, siteId)\n    ]);\n    await this.deleteKeys([...keys.results || [], ...uploadKeys.results || []].map((row) => row.r2_key));\n    return true;\n  }\n  async findUpload(accountId, idempotencyKey) {\n    return this.upload(await this.db.prepare(\"SELECT * FROM uploads WHERE account_id = ?1 AND idempotency_key = ?2\").bind(accountId, idempotencyKey).first());\n  }\n  async createUpload(upload) {\n    await this.db.prepare(\"INSERT INTO uploads(upload_id,account_id,site_id,revision,source_path,title,idempotency_key,format_version,chunk_protocol_version,expected_chunk_count,expected_object_count,declared_bytes,status,created_at,expires_at,result_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)\").bind(upload.uploadId, upload.accountId, upload.siteId, upload.revision, upload.sourcePath, upload.title, upload.idempotencyKey, upload.formatVersion, upload.chunkProtocolVersion, upload.expectedChunkCount, upload.expectedObjectCount, upload.declaredBytes, upload.status, upload.createdAt, upload.expiresAt, null).run();\n  }\n  async getUpload(uploadId) {\n    return this.upload(await this.db.prepare(\"SELECT * FROM uploads WHERE upload_id = ?1\").bind(uploadId).first());\n  }\n  async putUploadChunk(input) {\n    let object = this.uploadObject(await this.db.prepare(\"SELECT * FROM upload_objects WHERE upload_id = ?1 AND path = ?2\").bind(input.upload.uploadId, input.object.path).first());\n    if (object && (object.kind !== input.object.kind || object.contentType !== input.object.contentType || object.encoding !== input.object.encoding || object.chunkCount !== input.object.chunkCount)) throw new ServiceError(409, \"CONFLICT\", \"Upload object metadata conflict\");\n    if (!object) {\n      object = { uploadId: input.upload.uploadId, objectId: randomId(16), ...input.object, byteSize: 0 };\n      await this.db.prepare(\"INSERT INTO upload_objects(upload_id,object_id,kind,path,content_type,encoding,chunk_count,byte_size) VALUES (?1,?2,?3,?4,?5,?6,?7,0)\").bind(object.uploadId, object.objectId, object.kind, object.path, object.contentType, object.encoding, object.chunkCount).run();\n    }\n    const existing = await this.db.prepare(\"SELECT * FROM upload_chunks WHERE upload_id = ?1 AND object_id = ?2 AND chunk_index = ?3\").bind(input.upload.uploadId, object.objectId, input.chunkIndex).first();\n    const key = existing?.r2_key ? String(existing.r2_key) : this.r2Key(input.upload, object.objectId, input.chunkIndex);\n    if (existing) {\n      const current = this.bucket ? await this.readR2Chunk(key, \"Stored upload object is missing\") : this.d1ChunkBytes(existing, \"Stored upload object is missing\");\n      if (!bytesEqual(current, input.bytes)) throw new ServiceError(409, \"CONFLICT\", \"Upload chunk conflict\");\n    } else {\n      if (!this.bucket && object.byteSize + input.byteLength > D1_ONLY_MAX_OBJECT_BYTES) {\n        throw new ServiceError(413, \"OBJECT_TOO_LARGE\", `Individual files must be ${D1_ONLY_MAX_OBJECT_BYTES / 1e6} MB or smaller for D1-only deployment`);\n      }\n      try {\n        if (this.bucket) await this.bucket.put(key, input.bytes);\n        const chunkStatement = this.bucket ? this.db.prepare(\"INSERT INTO upload_chunks(upload_id,object_id,chunk_index,r2_key,byte_length) VALUES (?1,?2,?3,?4,?5)\").bind(input.upload.uploadId, object.objectId, input.chunkIndex, key, input.byteLength) : this.db.prepare(\"INSERT INTO upload_chunks(upload_id,object_id,chunk_index,r2_key,byte_length,data) VALUES (?1,?2,?3,?4,?5,?6)\").bind(input.upload.uploadId, object.objectId, input.chunkIndex, key, input.byteLength, input.bytes.slice());\n        await this.db.batch([\n          chunkStatement,\n          this.db.prepare(\"UPDATE upload_objects SET byte_size = byte_size + ?1 WHERE upload_id = ?2 AND object_id = ?3\").bind(input.byteLength, input.upload.uploadId, object.objectId)\n        ]);\n      } catch (error) {\n        await this.bucket?.delete(key).catch(() => void 0);\n        throw error;\n      }\n      object.byteSize += input.byteLength;\n    }\n    const count = await this.db.prepare(\"SELECT COUNT(*) AS count FROM upload_chunks WHERE upload_id = ?1 AND object_id = ?2\").bind(input.upload.uploadId, object.objectId).first();\n    return { object, chunk: { uploadId: input.upload.uploadId, objectId: object.objectId, chunkIndex: input.chunkIndex, byteLength: input.byteLength, bytes: input.bytes.slice() }, receivedChunks: Number(count?.count || 0) };\n  }\n  async listUploadObjects(uploadId) {\n    const result = await this.db.prepare(\"SELECT * FROM upload_objects WHERE upload_id = ?1 ORDER BY path\").bind(uploadId).all();\n    return (result.results || []).map((row) => this.uploadObject(row));\n  }\n  async listUploadChunks(uploadId, objectId) {\n    const result = await this.db.prepare(\"SELECT * FROM upload_chunks WHERE upload_id = ?1 AND object_id = ?2 ORDER BY chunk_index\").bind(uploadId, objectId).all();\n    const chunks = [];\n    for (const row of result.results || []) {\n      const bytes = this.bucket ? await this.readR2Chunk(String(row.r2_key), \"Stored upload object is missing\") : this.d1ChunkBytes(row, \"Stored upload object is missing\");\n      chunks.push({ uploadId, objectId, chunkIndex: Number(row.chunk_index), byteLength: Number(row.byte_length), bytes });\n    }\n    return chunks;\n  }\n  async commitUpload(uploadId, input) {\n    const upload = await this.getUpload(uploadId);\n    if (!upload) throw new ServiceError(404, \"NOT_FOUND\", \"Upload not found\");\n    const previous = await this.db.prepare(\"SELECT * FROM sites WHERE site_id = ?1\").bind(upload.siteId).first();\n    const oldKeys = previous ? await this.db.prepare(\"SELECT r2_key FROM object_chunks WHERE site_id = ?1\").bind(upload.siteId).all() : { results: [] };\n    const paths = (await this.listUploadObjects(uploadId)).map((object) => object.path).sort();\n    const resultJson = JSON.stringify({ siteId: upload.siteId, revision: upload.revision, uploadedPaths: paths });\n    const statements = [\n      this.db.prepare(\"INSERT INTO sites(site_id,account_id,title,source_path,current_revision,byte_size,object_count,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(site_id) DO UPDATE SET title=excluded.title,source_path=excluded.source_path,current_revision=excluded.current_revision,byte_size=excluded.byte_size,object_count=excluded.object_count,updated_at=excluded.updated_at\").bind(upload.siteId, upload.accountId, upload.title, upload.sourcePath, upload.revision, input.byteSize, input.objectCount, input.now, input.now),\n      this.db.prepare(\"INSERT OR IGNORE INTO revisions(site_id,revision,created_at) VALUES (?1,?2,?3)\").bind(upload.siteId, upload.revision, input.now),\n      this.db.prepare(\"INSERT OR IGNORE INTO objects(site_id,revision,object_id,kind,path,content_type,encoding,chunk_count,byte_size) SELECT ?1,?2,object_id,kind,path,content_type,encoding,chunk_count,byte_size FROM upload_objects WHERE upload_id = ?3\").bind(upload.siteId, upload.revision, uploadId),\n      (this.bucket ? this.db.prepare(\"INSERT OR IGNORE INTO object_chunks(site_id,revision,object_id,chunk_index,r2_key,byte_length) SELECT ?1,?2,object_id,chunk_index,r2_key,byte_length FROM upload_chunks WHERE upload_id = ?3\") : this.db.prepare(\"INSERT OR IGNORE INTO object_chunks(site_id,revision,object_id,chunk_index,r2_key,byte_length,data) SELECT ?1,?2,object_id,chunk_index,r2_key,byte_length,data FROM upload_chunks WHERE upload_id = ?3\")).bind(upload.siteId, upload.revision, uploadId),\n      this.db.prepare(\"DELETE FROM object_chunks WHERE site_id = ?1 AND revision <> ?2\").bind(upload.siteId, upload.revision),\n      this.db.prepare(\"DELETE FROM objects WHERE site_id = ?1 AND revision <> ?2\").bind(upload.siteId, upload.revision),\n      this.db.prepare(\"DELETE FROM revisions WHERE site_id = ?1 AND revision <> ?2\").bind(upload.siteId, upload.revision),\n      this.db.prepare(\"UPDATE uploads SET status='committed', result_json=?1 WHERE upload_id=?2 AND status='open'\").bind(resultJson, uploadId),\n      this.db.prepare(\"DELETE FROM upload_chunks WHERE upload_id = ?1\").bind(uploadId),\n      this.db.prepare(\"DELETE FROM upload_objects WHERE upload_id = ?1\").bind(uploadId)\n    ];\n    await this.db.batch(statements);\n    await this.deleteKeys((oldKeys.results || []).map((row) => row.r2_key));\n    return await this.getSite(upload.accountId, upload.siteId);\n  }\n  async expireUploads(now) {\n    const rows = await this.db.prepare(\"SELECT upload_id FROM uploads WHERE status='open' AND expires_at <= ?1\").bind(now).all();\n    if ((rows.results || []).length === 0) return 0;\n    const ids = (rows.results || []).map((row) => row.upload_id);\n    const keys = await this.db.prepare(`SELECT r2_key FROM upload_chunks WHERE upload_id IN (${ids.map(() => \"?\").join(\",\")})`).bind(...ids).all();\n    await this.db.batch(ids.map((id) => this.db.prepare(\"DELETE FROM uploads WHERE upload_id = ?1 AND status='open'\").bind(id)));\n    await this.deleteKeys((keys.results || []).map((row) => row.r2_key));\n    return ids.length;\n  }\n  async getViewerObject(siteId, path) {\n    const site = this.site(await this.db.prepare(\"SELECT * FROM sites WHERE site_id = ?1\").bind(siteId).first());\n    if (!site) return void 0;\n    const object = this.publishedObject(await this.db.prepare(\"SELECT * FROM objects WHERE site_id = ?1 AND revision = ?2 AND path = ?3\").bind(siteId, site.currentRevision, path).first(), siteId, site.currentRevision);\n    if (!object) return void 0;\n    const rows = await this.db.prepare(\"SELECT * FROM object_chunks WHERE site_id = ?1 AND revision = ?2 AND object_id = ?3 ORDER BY chunk_index\").bind(siteId, site.currentRevision, object.objectId).all();\n    const bucket = this.bucket;\n    const chunkRows = rows.results || [];\n    const chunks = (async function* () {\n      for (const row of chunkRows) {\n        if (!bucket) {\n          yield d1BlobBytes(row.data, \"Stored published object is missing\");\n          continue;\n        }\n        const stored = await bucket.get(String(row.r2_key));\n        if (!stored) throw new ServiceError(500, \"INTERNAL_ERROR\", \"Stored published object is missing\");\n        if (stored.body) {\n          const reader = stored.body.getReader();\n          while (true) {\n            const next = await reader.read();\n            if (next.done) break;\n            if (next.value) yield next.value;\n          }\n        } else {\n          yield new Uint8Array(await stored.arrayBuffer());\n        }\n      }\n    })();\n    return { site, object: { ...object, siteId, revision: site.currentRevision }, chunks };\n  }\n  async cleanupOrphanedObjects(_now) {\n    const old = await this.db.prepare(\"SELECT oc.r2_key FROM object_chunks oc JOIN sites s ON s.site_id = oc.site_id WHERE oc.revision <> s.current_revision\").all();\n    const expired = await this.db.prepare(\"SELECT uc.r2_key FROM upload_chunks uc JOIN uploads u ON u.upload_id = uc.upload_id WHERE u.status='expired'\").all();\n    const keys = [...old.results || [], ...expired.results || []].map((row) => row.r2_key);\n    const listed = this.bucket?.list ? await this.bucket.list({ prefix: \"tenants/\" }) : void 0;\n    if (listed) {\n      const active = await this.db.prepare(\"SELECT r2_key FROM object_chunks UNION SELECT uc.r2_key FROM upload_chunks uc JOIN uploads u ON u.upload_id=uc.upload_id WHERE u.status='open'\").all();\n      const activeKeys = new Set((active.results || []).map((row) => row.r2_key));\n      for (const object of listed.objects || []) if (!activeKeys.has(object.key)) keys.push(object.key);\n    }\n    await this.db.batch([\n      this.db.prepare(\"DELETE FROM object_chunks WHERE EXISTS (SELECT 1 FROM sites s WHERE s.site_id=object_chunks.site_id AND object_chunks.revision <> s.current_revision)\"),\n      this.db.prepare(\"DELETE FROM upload_chunks WHERE upload_id IN (SELECT upload_id FROM uploads WHERE status='expired')\"),\n      this.db.prepare(\"DELETE FROM upload_objects WHERE upload_id IN (SELECT upload_id FROM uploads WHERE status='expired')\"),\n      this.db.prepare(\"DELETE FROM uploads WHERE status='expired'\")\n    ]);\n    const uniqueKeys = [...new Set(keys)];\n    await this.deleteKeys(uniqueKeys);\n    return uniqueKeys.length;\n  }\n  async createDeviceAuthorization(record) {\n    await this.db.prepare(\"INSERT INTO device_authorizations(id,device_code_hash,status,created_at,expires_at,token_name) VALUES (?1,?2,?3,?4,?5,?6)\").bind(record.id, record.deviceCodeHash, record.status, record.createdAt, record.expiresAt, record.tokenName || null).run();\n  }\n  async getDeviceAuthorization(deviceCodeHash) {\n    return this.device(await this.db.prepare(\"SELECT * FROM device_authorizations WHERE device_code_hash = ?1\").bind(deviceCodeHash).first());\n  }\n  async approveDeviceAuthorization(deviceCodeHash, accountId, _tokenId, tokenName, now = (/* @__PURE__ */ new Date()).toISOString()) {\n    const result = await this.db.prepare(\"UPDATE device_authorizations SET account_id=?1,status='approved',token_name=?2 WHERE device_code_hash=?3 AND status='pending' AND expires_at > ?4\").bind(accountId, tokenName, deviceCodeHash, now).run();\n    return Number(result.meta?.changes || 0) === 1;\n  }\n  async consumeApprovedDeviceAuthorization(deviceCodeHash) {\n    const now = (/* @__PURE__ */ new Date()).toISOString();\n    const result = await this.db.prepare(\"UPDATE device_authorizations SET consumed_at=?1 WHERE device_code_hash=?2 AND status='approved' AND consumed_at IS NULL\").bind(now, deviceCodeHash).run();\n    if (Number(result.meta?.changes || 0) !== 1) return void 0;\n    return this.device(await this.db.prepare(\"SELECT * FROM device_authorizations WHERE device_code_hash = ?1\").bind(deviceCodeHash).first());\n  }\n  async isBootstrapConsumed() {\n    const row = await this.db.prepare(\"SELECT consumed_at FROM bootstrap_state WHERE id=1\").first();\n    return Boolean(row?.consumed_at);\n  }\n  async consumeBootstrap(now) {\n    const result = await this.db.prepare(\"UPDATE bootstrap_state SET consumed_at=?1 WHERE id=1 AND consumed_at IS NULL\").bind(now).run();\n    return Number(result.meta?.changes || 0) === 1;\n  }\n  async deleteKeys(keys) {\n    if (keys.length > 0 && this.bucket) await this.bucket.delete(keys);\n  }\n  async readR2Chunk(key, message) {\n    const stored = await this.bucket.get(key);\n    if (!stored) throw new ServiceError(500, \"INTERNAL_ERROR\", message);\n    return new Uint8Array(await stored.arrayBuffer());\n  }\n  d1ChunkBytes(row, message) {\n    return d1BlobBytes(row.data, message);\n  }\n  r2Key(upload, objectId, chunkIndex) {\n    return `tenants/${upload.accountId || this.tenantId}/sites/${upload.siteId}/revisions/${upload.revision}/objects/${objectId}/chunks/${chunkIndex}`;\n  }\n  account(row) {\n    return row ? { id: String(row.id), email: String(row.email), passwordHash: String(row.password_hash), createdAt: String(row.created_at) } : void 0;\n  }\n  recovery(row) {\n    return row ? { id: String(row.id), accountId: String(row.account_id), codeHash: String(row.code_hash), createdAt: String(row.created_at), usedAt: row.used_at ? String(row.used_at) : void 0 } : void 0;\n  }\n  session(row) {\n    return row ? { id: String(row.id), accountId: String(row.account_id), createdAt: String(row.created_at), expiresAt: String(row.expires_at) } : void 0;\n  }\n  token(row) {\n    return row ? { id: String(row.id), accountId: String(row.account_id), name: String(row.name), tokenHash: String(row.token_hash), scope: String(row.scope), createdAt: String(row.created_at), lastUsedAt: row.last_used_at ? String(row.last_used_at) : void 0, expiresAt: row.expires_at ? String(row.expires_at) : void 0, revokedAt: row.revoked_at ? String(row.revoked_at) : void 0 } : void 0;\n  }\n  site(row) {\n    return row ? { siteId: String(row.site_id), accountId: String(row.account_id), title: String(row.title), sourcePath: String(row.source_path), currentRevision: Number(row.current_revision), byteSize: Number(row.byte_size), objectCount: Number(row.object_count), createdAt: String(row.created_at), updatedAt: String(row.updated_at) } : void 0;\n  }\n  upload(row) {\n    if (!row) return void 0;\n    return { uploadId: String(row.upload_id), accountId: String(row.account_id), siteId: String(row.site_id), revision: Number(row.revision), sourcePath: String(row.source_path), title: String(row.title), idempotencyKey: String(row.idempotency_key), formatVersion: 1, chunkProtocolVersion: 2, expectedChunkCount: Number(row.expected_chunk_count), expectedObjectCount: Number(row.expected_object_count), declaredBytes: Number(row.declared_bytes), status: String(row.status), createdAt: String(row.created_at), expiresAt: String(row.expires_at), result: row.result_json ? JSON.parse(String(row.result_json)) : void 0 };\n  }\n  uploadObject(row) {\n    return row ? { uploadId: String(row.upload_id), objectId: String(row.object_id), kind: String(row.kind), path: String(row.path), contentType: String(row.content_type), encoding: String(row.encoding), chunkCount: Number(row.chunk_count), byteSize: Number(row.byte_size) } : void 0;\n  }\n  publishedObject(row, siteId, revision) {\n    return row ? { siteId, revision, uploadId: \"\", objectId: String(row.object_id), kind: String(row.kind), path: String(row.path), contentType: String(row.content_type), encoding: String(row.encoding), chunkCount: Number(row.chunk_count), byteSize: Number(row.byte_size) } : void 0;\n  }\n  device(row) {\n    return row ? { id: String(row.id), deviceCodeHash: String(row.device_code_hash), accountId: row.account_id ? String(row.account_id) : void 0, status: String(row.status), createdAt: String(row.created_at), expiresAt: String(row.expires_at), consumedAt: row.consumed_at ? String(row.consumed_at) : void 0, tokenName: row.token_name ? String(row.token_name) : void 0 } : void 0;\n  }\n};\nfunction bytesEqual(left, right) {\n  return left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);\n}\nfunction d1BlobBytes(value, message) {\n  if (Array.isArray(value)) {\n    for (const byte of value) {\n      if (!Number.isInteger(byte) || byte < 0 || byte > 255) throw new ServiceError(500, \"INTERNAL_ERROR\", message);\n    }\n    return Uint8Array.from(value);\n  }\n  if (value instanceof Uint8Array) return value.slice();\n  if (value instanceof ArrayBuffer) return new Uint8Array(value);\n  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();\n  throw new ServiceError(500, \"INTERNAL_ERROR\", message);\n}\n\n// server/worker/env.ts\nfunction createService(env, request) {\n  const publicBaseUrl = String(env.PUBLIC_BASE_URL || new URL(request.url).origin).replace(/\\/$/, \"\");\n  return new PublishService({ storage: new CloudflareD1R2Storage(env.DB, env.CONTENTS, \"default\"), publicBaseUrl, bootstrapSecret: env.BOOTSTRAP_SECRET });\n}\n\n// server/console/pages.ts\nfunction escapeHtml(value) {\n  return String(value ?? \"\").replaceAll(\"&\", \"&amp;\").replaceAll(\"<\", \"&lt;\").replaceAll(\">\", \"&gt;\").replaceAll('\"', \"&quot;\").replaceAll(\"'\", \"&#39;\");\n}\nfunction page(title, body, options = {}) {\n  const nav = options.session ? `<nav><a href=\"/account/usage\">Usage</a> \\xB7 <a href=\"/account/tokens\">Tokens</a> \\xB7 <a href=\"/account/sites\">Sites</a><form method=\"post\" action=\"/logout\" style=\"display:inline\"><button>Log out</button></form></nav>` : \"\";\n  return `<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>${escapeHtml(title)} \\xB7 One-Click Publish</title><style>body{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.5;color:#202124}label{display:block;margin:14px 0 4px}input{width:100%;max-width:420px;padding:9px;border:1px solid #bbb;border-radius:6px}button{margin-top:16px;padding:9px 14px;border:0;border-radius:6px;background:#5b4bdb;color:white;cursor:pointer}nav{margin-bottom:28px}nav form button{background:none;color:#5b4bdb;padding:0;margin:0}code{background:#f1f1f1;padding:3px 5px;border-radius:4px;word-break:break-all}.card{border:1px solid #ddd;border-radius:8px;padding:18px;margin:16px 0}.warning{background:#fff4d6;padding:12px;border-radius:6px}</style></head><body>${nav}${body}</body></html>`;\n}\nfunction formField(name, label, type = \"text\", required = true) {\n  return `<label for=\"${escapeHtml(name)}\">${escapeHtml(label)}</label><input id=\"${escapeHtml(name)}\" name=\"${escapeHtml(name)}\" type=\"${escapeHtml(type)}\"${required ? \" required\" : \"\"}>`;\n}\nfunction recoveryPage(recoveryCode2, next = \"/login\") {\n  return page(\"Save your recovery code\", `<h1>Save your recovery code</h1><p>This code is shown once. Store it somewhere safe before continuing.</p><p class=\"warning\"><code>${escapeHtml(recoveryCode2)}</code></p><p><a href=\"${escapeHtml(next)}\">Continue</a></p>`);\n}\n\n// server/worker/routes.ts\nvar JSON_HEADERS = { \"content-type\": \"application/json; charset=utf-8\", \"cache-control\": \"no-store\" };\nasync function routeRequest(context) {\n  const { request, service } = context;\n  const url = new URL(request.url);\n  if (request.method === \"OPTIONS\") return new Response(null, { status: 204, headers: { \"access-control-allow-origin\": \"*\", \"access-control-allow-headers\": \"authorization,content-type\", \"access-control-allow-methods\": \"GET,POST,DELETE,OPTIONS\" } });\n  try {\n    if (request.method === \"GET\" && url.pathname === \"/healthz\") return json({ status: \"ok\", service: \"publish-note\", storage: context.env.CONTENTS ? \"cloudflare-d1-r2\" : \"cloudflare-d1\" });\n    if (url.pathname.startsWith(\"/s/\")) return await viewerResponse(service, request, url);\n    if (url.pathname === \"/connect\" && request.method === \"GET\") return await connectPage(context);\n    if (url.pathname === \"/connect/approve\" && request.method === \"POST\") return await approveConnect(context);\n    if (url.pathname === \"/__internal/provision/initialize\" && request.method === \"POST\") return await initializeProvisioning(context);\n    if (url.pathname === \"/__internal/provision/reconnect\" && request.method === \"POST\") return await reconnectProvisioning(context);\n    if (url.pathname === \"/setup\") return await setupPage(context);\n    if (url.pathname === \"/login\") return await loginPage(context);\n    if (url.pathname === \"/register\") return await registerPage(context);\n    if (url.pathname === \"/recover\") return await recoverPage(context);\n    if (url.pathname === \"/logout\" && request.method === \"POST\") return await logoutPage(context);\n    if (url.pathname.startsWith(\"/account\")) return await accountPage(context);\n    if (url.pathname.startsWith(\"/v1/\")) return await apiRequest(context);\n    return new Response(\"Not Found\", { status: 404 });\n  } catch (error) {\n    if (url.pathname.startsWith(\"/v1/\") || url.pathname === \"/healthz\" || url.pathname === \"/__internal/provision/initialize\" || url.pathname === \"/__internal/provision/reconnect\") return jsonError(error);\n    const normalized = asServiceError(error);\n    return new Response(page(\"Error\", `<h1>Request failed</h1><p>${escapeHtml(normalized.message)}</p>`), { status: normalized.status, headers: { \"content-type\": \"text/html; charset=utf-8\" } });\n  }\n}\nasync function initializeProvisioning(context) {\n  const input = await readJson(context.request);\n  const secret = context.request.headers.get(\"x-publish-note-bootstrap-secret\") || \"\";\n  const result = await context.service.initializeProvisioning({\n    provisionSecret: secret,\n    ownerKey: String(input.ownerKey || context.request.headers.get(\"x-publish-note-owner-key\") || \"\"),\n    expiresAt: String(input.expiresAt || context.request.headers.get(\"x-publish-note-expires-at\") || \"\"),\n    signature: String(input.signature || context.request.headers.get(\"x-publish-note-signature\") || \"\"),\n    tokenName: String(input.tokenName || \"Obsidian plugin\")\n  });\n  return json(result, 201);\n}\nasync function reconnectProvisioning(context) {\n  const input = await readJson(context.request);\n  const secret = context.request.headers.get(\"x-publish-note-bootstrap-secret\") || \"\";\n  const result = await context.service.reconnectProvisioning({\n    provisionSecret: secret,\n    ownerKey: String(input.ownerKey || context.request.headers.get(\"x-publish-note-owner-key\") || \"\"),\n    expiresAt: String(input.expiresAt || context.request.headers.get(\"x-publish-note-expires-at\") || \"\"),\n    signature: String(input.signature || context.request.headers.get(\"x-publish-note-signature\") || \"\"),\n    tokenName: String(input.tokenName || \"Obsidian plugin\")\n  });\n  return json(result, 200);\n}\nasync function apiRequest(context) {\n  const { request, service } = context;\n  const url = new URL(request.url);\n  if (request.method === \"POST\" && url.pathname === \"/v1/auth/register\") {\n    const result = await service.register(await readJson(request));\n    return json({ account: publicAccount(result.account), recoveryCode: result.recoveryCode }, 201);\n  }\n  if (request.method === \"POST\" && url.pathname === \"/v1/auth/login\") {\n    const result = await service.login(await readJson(request));\n    const response = json({ account: publicAccount(result.account) });\n    response.headers.set(\"set-cookie\", sessionCookie(result.session.id, request));\n    return response;\n  }\n  if (request.method === \"POST\" && url.pathname === \"/v1/auth/logout\") {\n    await service.logout(parseCookie(request.headers.get(\"cookie\"), \"pn_session\"));\n    const response = json({ ok: true });\n    response.headers.set(\"set-cookie\", clearCookie(request));\n    return response;\n  }\n  if (request.method === \"GET\" && url.pathname === \"/v1/me\") return json({ account: publicAccount((await requireSession(context)).account) });\n  if (request.method === \"POST\" && url.pathname === \"/v1/auth/device/start\") return json(await service.startDeviceAuthorization());\n  if (request.method === \"POST\" && url.pathname === \"/v1/auth/device/poll\") return json(await service.pollDeviceAuthorization(String((await readJson(request)).deviceCode || \"\")));\n  if (request.method === \"POST\" && url.pathname === \"/v1/auth/device/approve\") {\n    const session2 = await requireSession(context);\n    const input = await readJson(request);\n    await service.approveDeviceAuthorization(session2, String(input.deviceCode || \"\"), input.tokenName);\n    return json({ ok: true });\n  }\n  if (request.method === \"POST\" && url.pathname === \"/v1/account/recover\") {\n    await service.recover(await readJson(request));\n    return json({ ok: true });\n  }\n  const sessionRoutes = url.pathname === \"/v1/tokens\" || url.pathname === \"/v1/usage\" || url.pathname === \"/v1/sites\" || /^\\/v1\\/tokens\\/[^/]+\\/revoke$/.test(url.pathname) || request.method === \"DELETE\" && /^\\/v1\\/sites\\/[^/]+$/.test(url.pathname);\n  const session = sessionRoutes ? await requireSession(context) : void 0;\n  if (session && request.method === \"GET\" && url.pathname === \"/v1/tokens\") return json({ tokens: await service.listTokens(session) });\n  if (session && request.method === \"POST\" && url.pathname === \"/v1/tokens\") {\n    const input = await readJson(request);\n    return json(await service.createToken(session.account.id, String(input.name || \"Obsidian plugin\"), input.expiresAt));\n  }\n  if (session && request.method === \"POST\" && /^\\/v1\\/tokens\\/[^/]+\\/revoke$/.test(url.pathname)) {\n    await service.revokeToken(session, decodeURIComponent(url.pathname.split(\"/\")[3]));\n    return json({ ok: true });\n  }\n  if (session && request.method === \"GET\" && url.pathname === \"/v1/usage\") return json(await usagePayload(service, session.account.id));\n  if (session && request.method === \"GET\" && url.pathname === \"/v1/sites\") return json({ sites: await service.listSites(session.account.id) });\n  if (session && request.method === \"DELETE\" && /^\\/v1\\/sites\\/[^/]+$/.test(url.pathname)) {\n    await service.deleteSite(session, decodeURIComponent(url.pathname.split(\"/\")[3]));\n    return json({ ok: true });\n  }\n  const token = await service.authenticatePublishToken(parseBearer(request.headers.get(\"authorization\")));\n  if (request.method === \"POST\" && url.pathname === \"/v1/sites/uploads\") return json(await service.startUpload(token, await readJson(request)));\n  const chunkMatch = /^\\/v1\\/uploads\\/([^/]+)\\/chunks$/.exec(url.pathname);\n  if (request.method === \"POST\" && chunkMatch) return json(await service.uploadChunk(token, { ...await readJson(request), uploadId: decodeURIComponent(chunkMatch[1]) }));\n  const commitMatch = /^\\/v1\\/uploads\\/([^/]+)\\/commit$/.exec(url.pathname);\n  if (request.method === \"POST\" && commitMatch) return json(await service.commitUpload(token, decodeURIComponent(commitMatch[1])));\n  throw new ServiceError(404, \"NOT_FOUND\", \"Not found\");\n}\nasync function viewerResponse(service, request, url) {\n  const match = /^\\/s\\/([^/]+)(\\/.*)?$/.exec(url.pathname);\n  if (!match) throw new ServiceError(404, \"NOT_FOUND\", \"Not found\");\n  const siteId = decodeURIComponent(match[1]);\n  const path = viewerPath(siteId, url.pathname);\n  const value = await service.viewer(siteId, path);\n  if (!value) return new Response(\"Not Found\", { status: 404, headers: { \"content-type\": \"text/plain; charset=utf-8\" } });\n  const stream = new ReadableStream({\n    async start(controller) {\n      try {\n        for await (const chunk of value.chunks) controller.enqueue(chunk);\n        controller.close();\n      } catch (error) {\n        controller.error(error);\n      }\n    }\n  });\n  return new Response(stream, { status: 200, headers: { \"content-type\": value.object.contentType, \"cache-control\": \"no-cache\" } });\n}\nasync function requireSession(context) {\n  const session = await context.service.accountForSession(parseCookie(context.request.headers.get(\"cookie\"), \"pn_session\"));\n  if (!session) throw new ServiceError(401, \"UNAUTHORIZED\", \"Sign in required\");\n  return session;\n}\nasync function connectPage(context) {\n  const code = new URL(context.request.url).searchParams.get(\"code\") || \"\";\n  if (!code) return html(\"Connect One-Click Publish\", `<h1>Connect One-Click Publish</h1><p>This link is missing a device code.</p>`);\n  const session = await context.service.accountForSession(parseCookie(context.request.headers.get(\"cookie\"), \"pn_session\"));\n  const next = `/connect?code=${code}`;\n  if (!session) return html(\"Connect One-Click Publish\", `<h1>Connect One-Click Publish</h1><p>Sign in before approving this Obsidian plugin connection.</p><p><a href=\"/login?next=${encodeURIComponent(next)}\">Sign in</a> \\xB7 <a href=\"/register?next=${encodeURIComponent(next)}\">Create an account</a></p>`);\n  return html(\"Approve connection\", `<h1>Approve connection</h1><p>Allow this Obsidian plugin to publish notes for <strong>${escapeHtml(session.account.email)}</strong>?</p><form method=\"post\" action=\"/connect/approve\"><input type=\"hidden\" name=\"deviceCode\" value=\"${escapeHtml(code)}\">${formField(\"tokenName\", \"Token name\", \"text\", false)}<button>Allow publishing</button></form>`);\n}\nasync function approveConnect(context) {\n  const session = await requireSession(context);\n  const form = await readForm(context.request);\n  await context.service.approveDeviceAuthorization(session, String(form.deviceCode || \"\"), String(form.tokenName || \"Obsidian plugin\"));\n  return html(\"Connected\", `<h1>Connected</h1><p>You can return to Obsidian. The plugin will finish connecting automatically.</p>`);\n}\nasync function setupPage(context) {\n  if (!context.service.bootstrapConfigured()) return html(\"Setup unavailable\", `<h1>Setup unavailable</h1><p>This Worker has no BOOTSTRAP_SECRET configured.</p>`, 503);\n  if (context.request.method === \"GET\") return html(\"First-time setup\", `<h1>First-time setup</h1><p>This creates the first account. The bootstrap secret is single-use and is never shown again.</p><form method=\"post\" action=\"/setup\">${formField(\"bootstrapSecret\", \"Bootstrap secret\", \"password\")}${formField(\"email\", \"Email\", \"email\")}${formField(\"password\", \"Password (10+ characters)\", \"password\")}<button>Create account</button></form>`);\n  const form = await readForm(context.request);\n  const result = await context.service.setup({ bootstrapSecret: String(form.bootstrapSecret || \"\"), email: String(form.email || \"\"), password: String(form.password || \"\") });\n  return new Response(recoveryPage(result.recoveryCode), { status: 201, headers: { \"content-type\": \"text/html; charset=utf-8\" } });\n}\nasync function loginPage(context) {\n  if (context.request.method === \"GET\") {\n    const next = safeNext(new URL(context.request.url).searchParams.get(\"next\"));\n    return html(\"Sign in\", `<h1>Sign in</h1><form method=\"post\" action=\"/login\">${formField(\"email\", \"Email\", \"email\")}${formField(\"password\", \"Password\", \"password\")}<input type=\"hidden\" name=\"next\" value=\"${escapeHtml(next)}\"><button>Sign in</button></form><p><a href=\"/register?next=${encodeURIComponent(next)}\">Create an account</a> \\xB7 <a href=\"/recover\">Use recovery code</a></p>`);\n  }\n  const form = await readForm(context.request);\n  const result = await context.service.login({ email: String(form.email || \"\"), password: String(form.password || \"\") });\n  return new Response(null, { status: 302, headers: { location: safeNext(form.next), \"set-cookie\": sessionCookie(result.session.id, context.request) } });\n}\nasync function registerPage(context) {\n  if (context.request.method === \"GET\") {\n    const next = safeNext(new URL(context.request.url).searchParams.get(\"next\"));\n    return html(\"Create account\", `<h1>Create account</h1><p>Email verification is not required. Save the one-time recovery code shown after registration.</p><form method=\"post\" action=\"/register\">${formField(\"email\", \"Email\", \"email\")}${formField(\"password\", \"Password (10+ characters)\", \"password\")}<input type=\"hidden\" name=\"next\" value=\"${escapeHtml(next)}\"><button>Create account</button></form><p><a href=\"/login?next=${encodeURIComponent(next)}\">Sign in</a></p>`);\n  }\n  const form = await readForm(context.request);\n  const result = await context.service.register({ email: String(form.email || \"\"), password: String(form.password || \"\") });\n  return new Response(recoveryPage(result.recoveryCode, `/login?next=${encodeURIComponent(safeNext(form.next))}`), { status: 201, headers: { \"content-type\": \"text/html; charset=utf-8\" } });\n}\nasync function recoverPage(context) {\n  if (context.request.method === \"GET\") return html(\"Recover account\", `<h1>Recover account</h1><p>Recovery revokes all existing sessions and Publish Tokens.</p><form method=\"post\" action=\"/recover\">${formField(\"email\", \"Email\", \"email\")}${formField(\"recoveryCode\", \"Recovery code\")}${formField(\"newPassword\", \"New password (10+ characters)\", \"password\")}<button>Reset password</button></form>`);\n  const form = await readForm(context.request);\n  await context.service.recover({ email: String(form.email || \"\"), recoveryCode: String(form.recoveryCode || \"\"), newPassword: String(form.newPassword || \"\") });\n  return html(\"Password reset\", `<h1>Password reset</h1><p>All previous sessions and Publish Tokens were revoked. <a href=\"/login\">Sign in again</a>.</p>`);\n}\nasync function logoutPage(context) {\n  await context.service.logout(parseCookie(context.request.headers.get(\"cookie\"), \"pn_session\"));\n  return new Response(null, { status: 302, headers: { location: \"/login\", \"set-cookie\": clearCookie(context.request) } });\n}\nasync function accountPage(context) {\n  const session = await requireSession(context);\n  const path = new URL(context.request.url).pathname;\n  const revokeTokenMatch = /^\\/account\\/tokens\\/([^/]+)\\/revoke$/.exec(path);\n  if (revokeTokenMatch && context.request.method === \"POST\") {\n    await context.service.revokeToken(session, decodeURIComponent(revokeTokenMatch[1]));\n    return new Response(null, { status: 302, headers: { location: \"/account/tokens\" } });\n  }\n  const deleteSiteMatch = /^\\/account\\/sites\\/([^/]+)\\/delete$/.exec(path);\n  if (deleteSiteMatch && context.request.method === \"POST\") {\n    await context.service.deleteSite(session, decodeURIComponent(deleteSiteMatch[1]));\n    return new Response(null, { status: 302, headers: { location: \"/account/sites\" } });\n  }\n  if (path === \"/account/tokens\") {\n    if (context.request.method === \"POST\") {\n      const form = await readForm(context.request);\n      const created = await context.service.createToken(session.account.id, String(form.name || \"Obsidian plugin\"));\n      return html(\"Token created\", `<h1>Token created</h1><p>Copy this token now. It will not be shown again.</p><p class=\"warning\"><code>${escapeHtml(created.token)}</code></p><p><a href=\"/account/tokens\">Back to tokens</a></p>`);\n    }\n    const tokens = await context.service.listTokens(session);\n    return html(\"Tokens\", `<h1>Publish Tokens</h1><p>Full token values are never shown after creation.</p><form method=\"post\" action=\"/account/tokens\">${formField(\"name\", \"Token name\", \"text\", false)}<button>Create token</button></form>${tokens.map((token) => `<div class=\"card\"><strong>${escapeHtml(token.name)}</strong><br>Created: ${escapeHtml(token.createdAt)}<br>Last used: ${escapeHtml(token.lastUsedAt || \"Never\")}<br>Status: ${escapeHtml(token.revokedAt ? \"Revoked\" : token.expiresAt && Date.parse(token.expiresAt) <= Date.now() ? \"Expired\" : \"Active\")} ${token.revokedAt ? \"\" : `<form method=\"post\" action=\"/account/tokens/${encodeURIComponent(token.id)}/revoke\"><button>Revoke</button></form>`}</div>`).join(\"\")}`, { session: true });\n  }\n  if (path === \"/account/sites\") {\n    const sites = await context.service.listSites(session.account.id);\n    return html(\"Sites\", `<h1>Published Notes</h1>${sites.map((site) => `<div class=\"card\"><strong>${escapeHtml(site.title)}</strong><br><a href=\"/s/${encodeURIComponent(site.siteId)}/\">${escapeHtml(siteUrlFor(context, site.siteId))}</a><br>Size: ${escapeHtml(site.byteSize)} bytes \\xB7 Updated: ${escapeHtml(site.updatedAt)}<form method=\"post\" action=\"/account/sites/${encodeURIComponent(site.siteId)}/delete\"><button>Delete site</button></form></div>`).join(\"\") || \"<p>No sites yet.</p>\"}`, { session: true });\n  }\n  const usage = await usagePayload(context.service, session.account.id);\n  return html(\"Usage\", `<h1>Usage</h1><p>Account: ${escapeHtml(session.account.email)}</p><div class=\"card\"><strong>${escapeHtml(usage.bytes)} / 52428800 bytes</strong><br>${escapeHtml(usage.siteCount)} / 10 published Notes<br>Service: ${escapeHtml(new URL(context.request.url).origin)}</div><p><a href=\"/account/tokens\">Manage tokens</a> \\xB7 <a href=\"/account/sites\">Manage sites</a></p>`, { session: true });\n}\nasync function usagePayload(service, accountId) {\n  const usage = await service.getUsage(accountId);\n  return { ...usage, maxBytes: service.maxAccountBytes, maxSites: service.maxSiteCount, sites: await service.listSites(accountId) };\n}\nfunction siteUrlFor(context, siteId) {\n  return `${new URL(context.request.url).origin}/s/${encodeURIComponent(siteId)}/`;\n}\nfunction publicAccount(account) {\n  return { id: account.id, email: account.email, createdAt: account.createdAt };\n}\nfunction json(value, status = 200) {\n  return new Response(JSON.stringify(value), { status, headers: JSON_HEADERS });\n}\nfunction html(title, body, statusOrOptions = 200, options = {}) {\n  const status = typeof statusOrOptions === \"number\" ? statusOrOptions : 200;\n  const pageOptions = typeof statusOrOptions === \"number\" ? options : statusOrOptions;\n  return new Response(page(title, body, pageOptions), { status, headers: { \"content-type\": \"text/html; charset=utf-8\" } });\n}\nasync function readJson(request) {\n  const bytes = new Uint8Array(await request.arrayBuffer());\n  if (bytes.byteLength > 4 * 1024 * 1024) throw new ServiceError(413, \"QUOTA_EXCEEDED\", \"Request body is too large\");\n  try {\n    return JSON.parse(new TextDecoder().decode(bytes));\n  } catch {\n    throw new ServiceError(400, \"BAD_REQUEST\", \"Invalid JSON\");\n  }\n}\nasync function readForm(request) {\n  const form = await request.formData();\n  return Object.fromEntries([...form.entries()].map(([key, value]) => [key, String(value)]));\n}\nfunction parseBearer(value) {\n  const match = /^Bearer\\s+(.+)$/i.exec(value || \"\");\n  return match?.[1];\n}\nfunction parseCookie(value, name) {\n  const item = (value || \"\").split(\";\").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));\n  return item ? decodeURIComponent(item.slice(name.length + 1)) : void 0;\n}\nfunction sessionCookie(value, request) {\n  const secure = new URL(request.url).protocol === \"https:\" ? \"; Secure\" : \"\";\n  return `pn_session=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${secure}`;\n}\nfunction clearCookie(request) {\n  const secure = new URL(request.url).protocol === \"https:\" ? \"; Secure\" : \"\";\n  return `pn_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;\n}\nfunction safeNext(value) {\n  const next = String(value || \"/account/usage\");\n  return next.startsWith(\"/\") && !next.startsWith(\"//\") ? next : \"/account/usage\";\n}\n\n// server/worker/index.ts\nvar index_default = {\n  async fetch(request, env, ctx) {\n    const service = createService(env, request);\n    return routeRequest({ service, request, env });\n  },\n  async scheduled(_controller, env, _ctx) {\n    await createService(env, new Request(\"https://worker.invalid/healthz\")).cleanup();\n  }\n};\nexport {\n  index_default as default\n};\n";
+const EMBEDDED_TARGET_PLUGIN_VERSION = "0.3.9";
+const EMBEDDED_TARGET_ARTIFACT_HASH = "5e10a606887feac7";
+const EMBEDDED_TARGET_WORKER_MODULE = "// src/shared/paths.ts\nfunction normalizeRelativePath(input) {\n  const normalized = input.replaceAll(\"\\\\\", \"/\").replace(/^\\/+/, \"\");\n  if (!normalized || normalized === \".\") {\n    return \"index.html\";\n  }\n  const parts = normalized.split(\"/\");\n  if (parts.some((part) => part === \"..\" || part === \".\" || part === \"\")) {\n    throw new Error(`Invalid relative path: ${input}`);\n  }\n  return parts.join(\"/\");\n}\nfunction siteUrl(siteId, baseUrl = \"https://share.example.com\") {\n  return `${baseUrl.replace(/\\/$/, \"\")}/s/${encodeURIComponent(siteId)}`;\n}\nfunction viewerPath(siteId, requestPath) {\n  const prefix = `/s/${encodeURIComponent(siteId)}`;\n  const withoutPrefix = requestPath.startsWith(prefix) ? requestPath.slice(prefix.length) : requestPath;\n  let path = withoutPrefix.replace(/^\\/+/, \"\");\n  try {\n    path = decodeURIComponent(path);\n  } catch {\n  }\n  return normalizeRelativePath(path || \"index.html\");\n}\n\n// server/core/errors.ts\nvar ServiceError = class extends Error {\n  status;\n  code;\n  constructor(status, code, message) {\n    super(message);\n    this.name = \"ServiceError\";\n    this.status = status;\n    this.code = code;\n  }\n};\nfunction asServiceError(error) {\n  if (error instanceof ServiceError) return error;\n  return new ServiceError(400, \"BAD_REQUEST\", error instanceof Error ? error.message : \"Bad request\");\n}\nfunction jsonError(error) {\n  const normalized = asServiceError(error);\n  const safeMessage = normalized.status >= 500 ? \"Internal server error\" : normalized.message;\n  return new Response(JSON.stringify({ error: safeMessage, code: normalized.code }), {\n    status: normalized.status,\n    headers: { \"content-type\": \"application/json; charset=utf-8\" }\n  });\n}\n\n// server/core/crypto.ts\nfunction runtimeCrypto() {\n  const value = globalThis.crypto;\n  if (!value?.subtle || !value?.getRandomValues) throw new Error(\"Web Crypto is unavailable\");\n  return value;\n}\nfunction randomId(byteLength = 18) {\n  const bytes = new Uint8Array(byteLength);\n  runtimeCrypto().getRandomValues(bytes);\n  let binary = \"\";\n  for (const byte of bytes) binary += String.fromCharCode(byte);\n  return btoa(binary).replaceAll(\"+\", \"-\").replaceAll(\"/\", \"_\").replace(/=+$/, \"\");\n}\nfunction randomSecret(prefix = \"\", byteLength = 32) {\n  return `${prefix}${randomId(byteLength)}`;\n}\nasync function sha256(value) {\n  const bytes = new TextEncoder().encode(value);\n  const digest = new Uint8Array(await runtimeCrypto().subtle.digest(\"SHA-256\", bytes));\n  let binary = \"\";\n  for (const byte of digest) binary += String.fromCharCode(byte);\n  return btoa(binary).replaceAll(\"+\", \"-\").replaceAll(\"/\", \"_\").replace(/=+$/, \"\");\n}\nasync function hmacSha256(secret, value) {\n  const crypto = runtimeCrypto();\n  const key = await crypto.subtle.importKey(\"raw\", new TextEncoder().encode(secret), { name: \"HMAC\", hash: \"SHA-256\" }, false, [\"sign\"]);\n  const signature = new Uint8Array(await crypto.subtle.sign(\"HMAC\", key, new TextEncoder().encode(value)));\n  let binary = \"\";\n  for (const byte of signature) binary += String.fromCharCode(byte);\n  return btoa(binary).replaceAll(\"+\", \"-\").replaceAll(\"/\", \"_\").replace(/=+$/, \"\");\n}\nvar MAX_PBKDF2_ITERATIONS = 1e5;\nasync function hashPassword(password, salt = randomSecret(\"\", 16), iterations = MAX_PBKDF2_ITERATIONS) {\n  const crypto = runtimeCrypto();\n  const key = await crypto.subtle.importKey(\"raw\", new TextEncoder().encode(password), \"PBKDF2\", false, [\"deriveBits\"]);\n  const bits = await crypto.subtle.deriveBits({ name: \"PBKDF2\", salt: new TextEncoder().encode(salt), iterations, hash: \"SHA-256\" }, key, 256);\n  let binary = \"\";\n  for (const byte of new Uint8Array(bits)) binary += String.fromCharCode(byte);\n  return `pbkdf2$${iterations}$${salt}$${btoa(binary)}`;\n}\nasync function verifyPassword(password, stored) {\n  const [scheme, iterationText, salt, expected] = stored.split(\"$\");\n  const iterations = Number(iterationText);\n  if (scheme !== \"pbkdf2\" || !iterationText || !salt || !expected || !Number.isInteger(iterations) || iterations < 1 || iterations > MAX_PBKDF2_ITERATIONS) return false;\n  const actual = await hashPassword(password, salt, iterations);\n  return constantTimeEqual(actual, stored);\n}\nfunction constantTimeEqual(left, right) {\n  if (left.length !== right.length) return false;\n  let different = 0;\n  for (let index = 0; index < left.length; index += 1) different |= left.charCodeAt(index) ^ right.charCodeAt(index);\n  return different === 0;\n}\nfunction normalizeEmail(email) {\n  return String(email || \"\").trim().toLowerCase();\n}\nfunction normalizePassword(password) {\n  return String(password || \"\");\n}\nfunction normalizeTokenName(name) {\n  return String(name || \"\").trim().slice(0, 100) || \"Obsidian plugin\";\n}\nfunction recoveryCode() {\n  const value = randomId(12).toUpperCase();\n  return `${value.slice(0, 4)}-${value.slice(4, 8)}-${value.slice(8, 12)}`;\n}\n\n// server/core/service.ts\nvar UPLOAD_TTL_MS = 24 * 60 * 60 * 1e3;\nvar SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1e3;\nvar DEVICE_TTL_MS = 10 * 60 * 1e3;\nvar PublishService = class {\n  storage;\n  now;\n  publicBaseUrl;\n  bootstrapSecret;\n  constructor(config) {\n    this.storage = config.storage;\n    this.now = config.now ?? (() => /* @__PURE__ */ new Date());\n    this.publicBaseUrl = String(config.publicBaseUrl || \"\").replace(/\\/$/, \"\");\n    this.bootstrapSecret = config.bootstrapSecret;\n  }\n  currentIso() {\n    return this.now().toISOString();\n  }\n  async register(input) {\n    const email = normalizeEmail(input.email);\n    const password = normalizePassword(input.password);\n    validateEmail(email);\n    validatePassword(password);\n    if (await this.storage.getAccountByEmail(email)) throw new ServiceError(409, \"CONFLICT\", \"Registration unavailable\");\n    const account = { id: randomId(18), email, passwordHash: await hashPassword(password), createdAt: this.currentIso() };\n    const plainRecoveryCode = recoveryCode();\n    const recovery = { id: randomId(16), accountId: account.id, codeHash: await sha256(plainRecoveryCode), createdAt: account.createdAt };\n    await this.storage.createAccount(account, recovery);\n    return { account, recoveryCode: plainRecoveryCode };\n  }\n  async login(input) {\n    const account = await this.storage.getAccountByEmail(normalizeEmail(input.email));\n    if (!account || !await verifyPassword(normalizePassword(input.password), account.passwordHash)) {\n      throw new ServiceError(401, \"UNAUTHORIZED\", \"Invalid email or password\");\n    }\n    const session = {\n      id: randomSecret(\"\", 32),\n      accountId: account.id,\n      createdAt: this.currentIso(),\n      expiresAt: new Date(this.now().getTime() + SESSION_TTL_MS).toISOString()\n    };\n    await this.storage.createSession(session);\n    return { account, session };\n  }\n  async accountForSession(sessionId) {\n    if (!sessionId) return void 0;\n    const session = await this.storage.getSession(sessionId);\n    if (!session) return void 0;\n    if (Date.parse(session.expiresAt) <= this.now().getTime()) {\n      await this.storage.deleteSession(session.id);\n      return void 0;\n    }\n    const account = await this.storage.getAccount(session.accountId);\n    return account ? { account } : void 0;\n  }\n  async logout(sessionId) {\n    if (sessionId) await this.storage.deleteSession(sessionId);\n  }\n  async recover(input) {\n    const account = await this.storage.getAccountByEmail(normalizeEmail(input.email));\n    const newPassword = normalizePassword(input.newPassword);\n    validatePassword(newPassword);\n    if (!account) throw new ServiceError(401, \"UNAUTHORIZED\", \"Recovery failed\");\n    const codeHash = await sha256(String(input.recoveryCode || \"\").trim().toUpperCase());\n    const consumed = await this.storage.consumeRecoveryCode(account.id, codeHash, this.currentIso());\n    if (!consumed) throw new ServiceError(401, \"UNAUTHORIZED\", \"Recovery failed\");\n    await this.storage.updateAccountPassword(account.id, await hashPassword(newPassword));\n    await this.storage.revokeAccountSessions(account.id);\n    await this.storage.revokeAccountTokens(account.id, this.currentIso());\n  }\n  async authenticatePublishToken(value) {\n    const token = String(value || \"\");\n    if (!token.startsWith(\"pn_\")) throw new ServiceError(401, \"UNAUTHORIZED\", \"Unauthorized\");\n    const record = await this.storage.getTokenByHash(await sha256(token));\n    if (!record || record.revokedAt || record.expiresAt && Date.parse(record.expiresAt) <= this.now().getTime()) {\n      throw new ServiceError(401, \"UNAUTHORIZED\", \"Unauthorized\");\n    }\n    const account = await this.storage.getAccount(record.accountId);\n    if (!account) throw new ServiceError(401, \"UNAUTHORIZED\", \"Unauthorized\");\n    await this.storage.touchToken(record.id, this.currentIso());\n    return { account, token: record };\n  }\n  async createToken(accountId, name = \"Obsidian plugin\", expiresAt) {\n    const account = await this.storage.getAccount(accountId);\n    if (!account) throw new ServiceError(401, \"UNAUTHORIZED\", \"Unauthorized\");\n    if (expiresAt && !Number.isFinite(Date.parse(expiresAt))) throw new ServiceError(400, \"BAD_REQUEST\", \"Invalid token expiry\");\n    const token = randomSecret(\"pn_\", 32);\n    const record = {\n      id: randomId(16),\n      accountId,\n      name: normalizeTokenName(name),\n      tokenHash: await sha256(token),\n      scope: \"publish:write\",\n      createdAt: this.currentIso(),\n      expiresAt\n    };\n    await this.storage.createToken(record);\n    return { token, view: tokenView(record) };\n  }\n  async listTokens(context) {\n    return (await this.storage.listTokens(context.account.id)).map(tokenView);\n  }\n  async revokeToken(context, tokenId) {\n    if (!await this.storage.revokeToken(context.account.id, tokenId, this.currentIso())) throw new ServiceError(404, \"NOT_FOUND\", \"Token not found\");\n  }\n  async startDeviceAuthorization() {\n    const deviceCode = randomSecret(\"\", 24);\n    const createdAt = this.currentIso();\n    const expiresAt = new Date(this.now().getTime() + DEVICE_TTL_MS).toISOString();\n    const record = { id: randomId(16), deviceCodeHash: await sha256(deviceCode), status: \"pending\", createdAt, expiresAt };\n    await this.storage.createDeviceAuthorization(record);\n    return { deviceCode, verificationUrl: `${this.publicBaseUrl}/connect?code=${encodeURIComponent(deviceCode)}`, expiresIn: DEVICE_TTL_MS / 1e3, interval: 2 };\n  }\n  async approveDeviceAuthorization(context, deviceCode, tokenName) {\n    const hash = await sha256(String(deviceCode || \"\"));\n    const ok = await this.storage.approveDeviceAuthorization(hash, context.account.id, \"\", normalizeTokenName(tokenName || \"Obsidian plugin\"), this.currentIso());\n    if (!ok) throw new ServiceError(400, \"BAD_REQUEST\", \"Device code is invalid, expired, or already used\");\n  }\n  async pollDeviceAuthorization(deviceCode) {\n    const hash = await sha256(String(deviceCode || \"\"));\n    const current = await this.storage.getDeviceAuthorization(hash);\n    if (!current) return { status: \"expired\" };\n    if (Date.parse(current.expiresAt) <= this.now().getTime()) return { status: \"expired\" };\n    if (current.status !== \"approved\") return { status: current.status };\n    const approved = await this.storage.consumeApprovedDeviceAuthorization(hash);\n    if (!approved?.accountId) return { status: approved?.status || \"expired\" };\n    const issued = await this.createToken(approved.accountId, approved.tokenName || \"Obsidian plugin\");\n    return { status: \"approved\", publishToken: issued.token };\n  }\n  async setup(input) {\n    if (!this.bootstrapSecret || input.bootstrapSecret !== this.bootstrapSecret || await this.storage.isBootstrapConsumed()) {\n      throw new ServiceError(403, \"FORBIDDEN\", \"Bootstrap is unavailable\");\n    }\n    const result = await this.register({ email: input.email, password: input.password });\n    if (!await this.storage.consumeBootstrap(this.currentIso())) {\n      await this.storage.deleteAccount(result.account.id);\n      throw new ServiceError(409, \"CONFLICT\", \"Bootstrap is unavailable\");\n    }\n    return result;\n  }\n  async initializeProvisioning(input) {\n    const expiresAt = Date.parse(String(input.expiresAt || \"\"));\n    if (!this.bootstrapSecret || input.provisionSecret !== this.bootstrapSecret || await this.storage.isBootstrapConsumed() || !Number.isFinite(expiresAt) || expiresAt <= this.now().getTime() || expiresAt > this.now().getTime() + 10 * 60 * 1e3) {\n      throw new ServiceError(403, \"FORBIDDEN\", \"Provisioning is unavailable\");\n    }\n    const ownerKey = String(input.ownerKey || \"\").trim();\n    if (!ownerKey || !input.signature || !constantTimeEqual(await hmacSha256(this.bootstrapSecret, `${ownerKey}\n${input.expiresAt}`), String(input.signature))) {\n      throw new ServiceError(403, \"FORBIDDEN\", \"Provisioning is unavailable\");\n    }\n    const suffix = ownerKey.replace(/[^A-Za-z0-9_-]/g, \"\").slice(0, 48) || randomId(8);\n    const email = `owner-${suffix}@selfhosted.publish-note.invalid`;\n    const password = randomSecret(\"\", 32);\n    const result = await this.register({ email, password });\n    const issued = await this.createToken(result.account.id, input.tokenName || \"Obsidian plugin\");\n    if (!await this.storage.consumeBootstrap(this.currentIso())) {\n      await this.storage.deleteAccount(result.account.id);\n      throw new ServiceError(409, \"CONFLICT\", \"Provisioning is unavailable\");\n    }\n    return { accountId: result.account.id, publishToken: issued.token };\n  }\n  async reconnectProvisioning(input) {\n    const expiresAt = Date.parse(String(input.expiresAt || \"\"));\n    if (!this.bootstrapSecret || input.provisionSecret !== this.bootstrapSecret || !await this.storage.isBootstrapConsumed() || !Number.isFinite(expiresAt) || expiresAt <= this.now().getTime() || expiresAt > this.now().getTime() + 10 * 60 * 1e3) {\n      throw new ServiceError(403, \"FORBIDDEN\", \"Reconnection is unavailable\");\n    }\n    const ownerKey = String(input.ownerKey || \"\").trim();\n    if (!ownerKey || !input.signature || !constantTimeEqual(await hmacSha256(this.bootstrapSecret, `${ownerKey}\n${input.expiresAt}`), String(input.signature))) {\n      throw new ServiceError(403, \"FORBIDDEN\", \"Reconnection is unavailable\");\n    }\n    const account = await this.storage.findProvisioningAccount();\n    if (!account) throw new ServiceError(404, \"NOT_FOUND\", \"Reconnection account is unavailable\");\n    const issued = await this.createToken(account.id, input.tokenName || \"Obsidian plugin\");\n    return { accountId: account.id, publishToken: issued.token };\n  }\n  async startUpload(context, input) {\n    validateUploadStart(input);\n    const existingUpload = await this.storage.findUpload(context.account.id, input.idempotencyKey);\n    if (existingUpload) return { uploadId: existingUpload.uploadId, siteId: existingUpload.siteId, revision: existingUpload.revision };\n    const existingSite = input.siteId ? await this.storage.getSite(context.account.id, input.siteId) : void 0;\n    if (input.siteId && !existingSite) throw new ServiceError(404, \"NOT_FOUND\", \"Site not found\");\n    const siteId = existingSite?.siteId || randomId(16);\n    const revision = (existingSite?.currentRevision || 0) + 1;\n    const createdAt = this.currentIso();\n    const upload = {\n      uploadId: randomId(18),\n      accountId: context.account.id,\n      siteId,\n      revision,\n      sourcePath: String(input.sourcePath),\n      title: String(input.title),\n      idempotencyKey: input.idempotencyKey,\n      formatVersion: 1,\n      chunkProtocolVersion: 2,\n      expectedChunkCount: input.chunkCount,\n      expectedObjectCount: input.objectCount,\n      declaredBytes: input.totalBytes,\n      status: \"open\",\n      createdAt,\n      expiresAt: new Date(this.now().getTime() + UPLOAD_TTL_MS).toISOString()\n    };\n    await this.storage.createUpload(upload);\n    return { uploadId: upload.uploadId, siteId, revision };\n  }\n  async uploadChunk(context, input) {\n    const upload = await this.authorizedUpload(context, input.uploadId);\n    if (upload.status !== \"open\") throw new ServiceError(409, \"CONFLICT\", \"Upload is no longer open\");\n    validateChunk(input);\n    const path = normalizeRelativePath(input.path);\n    const bytes = decodeChunk(input.encoding, input.body);\n    if (bytes.byteLength !== input.byteLength) throw new ServiceError(400, \"BAD_REQUEST\", \"Upload chunk byteLength does not match body\");\n    const result = await this.storage.putUploadChunk({ upload, object: { kind: input.kind, path, contentType: input.contentType, encoding: input.encoding, chunkCount: input.chunkCount }, chunkIndex: input.chunkIndex, byteLength: input.byteLength, bytes });\n    return { uploadId: upload.uploadId, path, chunkIndex: input.chunkIndex, receivedChunks: result.receivedChunks };\n  }\n  async commitUpload(context, uploadId, publicBaseUrl = this.publicBaseUrl) {\n    const upload = await this.authorizedUpload(context, uploadId);\n    if (upload.result) return this.resultFor(upload, upload.result, publicBaseUrl);\n    if (upload.status !== \"open\") throw new ServiceError(409, \"CONFLICT\", \"Upload is no longer open\");\n    const objects = await this.storage.listUploadObjects(upload.uploadId);\n    if (objects.length !== upload.expectedObjectCount || objects.length === 0) throw new ServiceError(400, \"BAD_REQUEST\", \"Upload is incomplete\");\n    let totalBytes = 0;\n    const uploadedPaths = [];\n    for (const object of objects) {\n      const chunks = await this.storage.listUploadChunks(upload.uploadId, object.objectId);\n      if (chunks.length !== object.chunkCount || chunks.some((chunk, index) => chunk.chunkIndex !== index)) throw new ServiceError(400, \"BAD_REQUEST\", `Upload object is incomplete: ${object.path}`);\n      const byteSize = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);\n      if (byteSize !== object.byteSize) throw new ServiceError(400, \"BAD_REQUEST\", `Upload object size mismatch: ${object.path}`);\n      totalBytes += byteSize;\n      uploadedPaths.push(object.path);\n      if (object.kind === \"page\" && object.encoding !== \"utf8\") throw new ServiceError(400, \"BAD_REQUEST\", \"Pages must use UTF-8 chunks\");\n      if (object.kind === \"asset\" && object.encoding !== \"base64\") throw new ServiceError(400, \"BAD_REQUEST\", \"Assets must use base64 chunks\");\n    }\n    if (totalBytes !== upload.declaredBytes) throw new ServiceError(400, \"BAD_REQUEST\", \"Upload byte size does not match the declared total\");\n    const input = { byteSize: totalBytes, objectCount: objects.length, now: this.currentIso(), publicBaseUrl: this.publicBaseUrl };\n    const site = await this.storage.commitUpload(upload.uploadId, input);\n    const result = { siteId: site.siteId, revision: site.currentRevision, uploadedPaths: [...uploadedPaths].sort() };\n    return this.resultFor({ ...upload, result }, result, publicBaseUrl);\n  }\n  async getUsage(accountId) {\n    return this.storage.getUsage(accountId);\n  }\n  async listSites(accountId) {\n    return this.storage.listSites(accountId);\n  }\n  async deleteSite(context, siteId) {\n    if (!await this.storage.deleteSite(context.account.id, siteId)) throw new ServiceError(404, \"NOT_FOUND\", \"Site not found\");\n  }\n  async viewer(siteId, path) {\n    return this.storage.getViewerObject(siteId, normalizeRelativePath(path || \"index.html\"));\n  }\n  async cleanup() {\n    const now = this.currentIso();\n    return { uploads: await this.storage.expireUploads(now), objects: await this.storage.cleanupOrphanedObjects(now) };\n  }\n  bootstrapConfigured() {\n    return Boolean(this.bootstrapSecret);\n  }\n  async authorizedUpload(context, uploadId) {\n    const upload = await this.storage.getUpload(uploadId);\n    if (!upload || upload.accountId !== context.account.id) throw new ServiceError(404, \"NOT_FOUND\", \"Upload not found\");\n    if (Date.parse(upload.expiresAt) <= this.now().getTime() && upload.status === \"open\") throw new ServiceError(410, \"UPLOAD_EXPIRED\", \"Upload session expired\");\n    return upload;\n  }\n  resultFor(upload, result, publicBaseUrl = this.publicBaseUrl) {\n    const base = String(publicBaseUrl || \"\").replace(/\\/$/, \"\");\n    return { siteId: result.siteId, url: siteUrl(result.siteId, base || \"https://share.example.com\"), revision: result.revision, uploadedPaths: [...result.uploadedPaths] };\n  }\n};\nfunction tokenView(token) {\n  return { id: token.id, name: token.name, scope: token.scope, createdAt: token.createdAt, lastUsedAt: token.lastUsedAt, expiresAt: token.expiresAt, revokedAt: token.revokedAt };\n}\nfunction validateEmail(email) {\n  if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email) || email.length > 320) throw new ServiceError(400, \"BAD_REQUEST\", \"A valid email is required\");\n}\nfunction validatePassword(password) {\n  if (password.length < 10 || password.length > 200) throw new ServiceError(400, \"BAD_REQUEST\", \"Password must be 10 to 200 characters\");\n}\nfunction validateUploadStart(input) {\n  if (input.chunkProtocolVersion !== 2 || !String(input.sourcePath || \"\").trim() || !String(input.title || \"\").trim() || !String(input.idempotencyKey || \"\").trim()) throw new ServiceError(400, \"BAD_REQUEST\", \"Invalid upload metadata\");\n  if (!Number.isInteger(input.chunkCount) || input.chunkCount < 1 || !Number.isInteger(input.objectCount) || input.objectCount < 1 || !Number.isInteger(input.totalBytes) || input.totalBytes < 1) throw new ServiceError(400, \"BAD_REQUEST\", \"Invalid upload sizes\");\n}\nfunction validateChunk(input) {\n  if (input.chunkProtocolVersion !== 2 || ![\"page\", \"asset\"].includes(input.kind) || ![\"utf8\", \"base64\"].includes(input.encoding)) throw new ServiceError(400, \"BAD_REQUEST\", \"Invalid upload chunk metadata\");\n  if (!Number.isInteger(input.chunkIndex) || input.chunkIndex < 0 || !Number.isInteger(input.chunkCount) || input.chunkCount < 1 || input.chunkIndex >= input.chunkCount || !Number.isInteger(input.byteLength) || input.byteLength < 0 || typeof input.body !== \"string\") throw new ServiceError(400, \"BAD_REQUEST\", \"Invalid upload chunk\");\n}\nfunction decodeChunk(encoding, body) {\n  if (encoding === \"utf8\") return new TextEncoder().encode(body);\n  try {\n    const binary = atob(body);\n    return Uint8Array.from(binary, (character) => character.charCodeAt(0));\n  } catch {\n    throw new ServiceError(400, \"BAD_REQUEST\", \"Binary asset chunk is not valid base64\");\n  }\n}\n\n// server/storage/cloudflare-d1-r2/index.ts\nvar D1_ONLY_MAX_OBJECT_BYTES = 2e7;\nvar CloudflareD1R2Storage = class {\n  db;\n  bucket;\n  tenantId;\n  constructor(db, bucket, tenantId = \"default\") {\n    this.db = db;\n    this.bucket = bucket;\n    this.tenantId = tenantId;\n  }\n  async getAccountByEmail(email) {\n    return this.account(await this.db.prepare(\"SELECT * FROM accounts WHERE email = ?1\").bind(email).first());\n  }\n  async getAccount(accountId) {\n    return this.account(await this.db.prepare(\"SELECT * FROM accounts WHERE id = ?1\").bind(accountId).first());\n  }\n  async findProvisioningAccount() {\n    return this.account(await this.db.prepare(\"SELECT * FROM accounts WHERE email LIKE ?1 ORDER BY created_at ASC LIMIT 1\").bind(\"%@selfhosted.publish-note.invalid\").first());\n  }\n  async createAccount(account, recoveryCode2) {\n    await this.db.batch([\n      this.db.prepare(\"INSERT INTO accounts(id,email,password_hash,created_at) VALUES (?1,?2,?3,?4)\").bind(account.id, account.email, account.passwordHash, account.createdAt),\n      this.db.prepare(\"INSERT INTO recovery_codes(id,account_id,code_hash,created_at) VALUES (?1,?2,?3,?4)\").bind(recoveryCode2.id, recoveryCode2.accountId, recoveryCode2.codeHash, recoveryCode2.createdAt)\n    ]);\n  }\n  async deleteAccount(accountId) {\n    await this.db.prepare(\"DELETE FROM accounts WHERE id = ?1\").bind(accountId).run();\n  }\n  async updateAccountPassword(accountId, passwordHash) {\n    await this.db.prepare(\"UPDATE accounts SET password_hash = ?1 WHERE id = ?2\").bind(passwordHash, accountId).run();\n  }\n  async getRecoveryCode(accountId) {\n    return this.recovery(await this.db.prepare(\"SELECT * FROM recovery_codes WHERE account_id = ?1\").bind(accountId).first());\n  }\n  async consumeRecoveryCode(accountId, codeHash, usedAt) {\n    const result = await this.db.prepare(\"UPDATE recovery_codes SET used_at = ?1 WHERE account_id = ?2 AND code_hash = ?3 AND used_at IS NULL\").bind(usedAt, accountId, codeHash).run();\n    return Number(result.meta?.changes || 0) === 1;\n  }\n  async createSession(session) {\n    await this.db.prepare(\"INSERT INTO sessions(id,account_id,created_at,expires_at) VALUES (?1,?2,?3,?4)\").bind(session.id, session.accountId, session.createdAt, session.expiresAt).run();\n  }\n  async getSession(sessionId) {\n    return this.session(await this.db.prepare(\"SELECT * FROM sessions WHERE id = ?1\").bind(sessionId).first());\n  }\n  async deleteSession(sessionId) {\n    await this.db.prepare(\"DELETE FROM sessions WHERE id = ?1\").bind(sessionId).run();\n  }\n  async revokeAccountSessions(accountId) {\n    await this.db.prepare(\"DELETE FROM sessions WHERE account_id = ?1\").bind(accountId).run();\n  }\n  async createToken(token) {\n    await this.db.prepare(\"INSERT INTO tokens(id,account_id,name,token_hash,scope,created_at,last_used_at,expires_at,revoked_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)\").bind(token.id, token.accountId, token.name, token.tokenHash, token.scope, token.createdAt, token.lastUsedAt || null, token.expiresAt || null, token.revokedAt || null).run();\n  }\n  async getTokenByHash(tokenHash) {\n    return this.token(await this.db.prepare(\"SELECT * FROM tokens WHERE token_hash = ?1\").bind(tokenHash).first());\n  }\n  async listTokens(accountId) {\n    const result = await this.db.prepare(\"SELECT * FROM tokens WHERE account_id = ?1 ORDER BY created_at DESC\").bind(accountId).all();\n    return (result.results || []).map((row) => this.token(row));\n  }\n  async revokeToken(accountId, tokenId, revokedAt) {\n    const result = await this.db.prepare(\"UPDATE tokens SET revoked_at = COALESCE(revoked_at, ?1) WHERE id = ?2 AND account_id = ?3\").bind(revokedAt, tokenId, accountId).run();\n    return Number(result.meta?.changes || 0) === 1;\n  }\n  async touchToken(tokenId, usedAt) {\n    await this.db.prepare(\"UPDATE tokens SET last_used_at = ?1 WHERE id = ?2\").bind(usedAt, tokenId).run();\n  }\n  async revokeAccountTokens(accountId, revokedAt) {\n    await this.db.prepare(\"UPDATE tokens SET revoked_at = COALESCE(revoked_at, ?1) WHERE account_id = ?2\").bind(revokedAt, accountId).run();\n  }\n  async getSite(accountId, siteId) {\n    return this.site(await this.db.prepare(\"SELECT * FROM sites WHERE account_id = ?1 AND site_id = ?2\").bind(accountId, siteId).first());\n  }\n  async listSites(accountId) {\n    const result = await this.db.prepare(\"SELECT * FROM sites WHERE account_id = ?1 ORDER BY updated_at DESC\").bind(accountId).all();\n    return (result.results || []).map((row) => this.site(row));\n  }\n  async getUsage(accountId) {\n    const row = await this.db.prepare(\"SELECT COALESCE(SUM(byte_size),0) AS bytes, COUNT(*) AS site_count FROM sites WHERE account_id = ?1\").bind(accountId).first();\n    return { bytes: Number(row?.bytes || 0), siteCount: Number(row?.site_count || 0) };\n  }\n  async deleteSite(accountId, siteId) {\n    const site = await this.getSite(accountId, siteId);\n    if (!site) return false;\n    const keys = await this.db.prepare(\"SELECT r2_key FROM object_chunks WHERE site_id = ?1\").bind(siteId).all();\n    const uploadKeys = await this.db.prepare(\"SELECT uc.r2_key FROM upload_chunks uc JOIN uploads u ON u.upload_id = uc.upload_id WHERE u.account_id = ?1 AND u.site_id = ?2\").bind(accountId, siteId).all();\n    await this.db.batch([\n      this.db.prepare(\"DELETE FROM object_chunks WHERE site_id = ?1\").bind(siteId),\n      this.db.prepare(\"DELETE FROM objects WHERE site_id = ?1\").bind(siteId),\n      this.db.prepare(\"DELETE FROM revisions WHERE site_id = ?1\").bind(siteId),\n      this.db.prepare(\"DELETE FROM uploads WHERE account_id = ?1 AND site_id = ?2\").bind(accountId, siteId),\n      this.db.prepare(\"DELETE FROM sites WHERE account_id = ?1 AND site_id = ?2\").bind(accountId, siteId)\n    ]);\n    await this.deleteKeys([...keys.results || [], ...uploadKeys.results || []].map((row) => row.r2_key));\n    return true;\n  }\n  async findUpload(accountId, idempotencyKey) {\n    return this.upload(await this.db.prepare(\"SELECT * FROM uploads WHERE account_id = ?1 AND idempotency_key = ?2\").bind(accountId, idempotencyKey).first());\n  }\n  async createUpload(upload) {\n    await this.db.prepare(\"INSERT INTO uploads(upload_id,account_id,site_id,revision,source_path,title,idempotency_key,format_version,chunk_protocol_version,expected_chunk_count,expected_object_count,declared_bytes,status,created_at,expires_at,result_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)\").bind(upload.uploadId, upload.accountId, upload.siteId, upload.revision, upload.sourcePath, upload.title, upload.idempotencyKey, upload.formatVersion, upload.chunkProtocolVersion, upload.expectedChunkCount, upload.expectedObjectCount, upload.declaredBytes, upload.status, upload.createdAt, upload.expiresAt, null).run();\n  }\n  async getUpload(uploadId) {\n    return this.upload(await this.db.prepare(\"SELECT * FROM uploads WHERE upload_id = ?1\").bind(uploadId).first());\n  }\n  async putUploadChunk(input) {\n    let object = this.uploadObject(await this.db.prepare(\"SELECT * FROM upload_objects WHERE upload_id = ?1 AND path = ?2\").bind(input.upload.uploadId, input.object.path).first());\n    if (object && (object.kind !== input.object.kind || object.contentType !== input.object.contentType || object.encoding !== input.object.encoding || object.chunkCount !== input.object.chunkCount)) throw new ServiceError(409, \"CONFLICT\", \"Upload object metadata conflict\");\n    if (!object) {\n      object = { uploadId: input.upload.uploadId, objectId: randomId(16), ...input.object, byteSize: 0 };\n      await this.db.prepare(\"INSERT INTO upload_objects(upload_id,object_id,kind,path,content_type,encoding,chunk_count,byte_size) VALUES (?1,?2,?3,?4,?5,?6,?7,0)\").bind(object.uploadId, object.objectId, object.kind, object.path, object.contentType, object.encoding, object.chunkCount).run();\n    }\n    const existing = await this.db.prepare(\"SELECT * FROM upload_chunks WHERE upload_id = ?1 AND object_id = ?2 AND chunk_index = ?3\").bind(input.upload.uploadId, object.objectId, input.chunkIndex).first();\n    const key = existing?.r2_key ? String(existing.r2_key) : this.r2Key(input.upload, object.objectId, input.chunkIndex);\n    if (existing) {\n      const current = this.bucket ? await this.readR2Chunk(key, \"Stored upload object is missing\") : this.d1ChunkBytes(existing, \"Stored upload object is missing\");\n      if (!bytesEqual(current, input.bytes)) throw new ServiceError(409, \"CONFLICT\", \"Upload chunk conflict\");\n    } else {\n      if (!this.bucket && object.byteSize + input.byteLength > D1_ONLY_MAX_OBJECT_BYTES) {\n        throw new ServiceError(413, \"OBJECT_TOO_LARGE\", `Individual files must be ${D1_ONLY_MAX_OBJECT_BYTES / 1e6} MB or smaller for D1-only deployment`);\n      }\n      try {\n        if (this.bucket) await this.bucket.put(key, input.bytes);\n        const chunkStatement = this.bucket ? this.db.prepare(\"INSERT INTO upload_chunks(upload_id,object_id,chunk_index,r2_key,byte_length) VALUES (?1,?2,?3,?4,?5)\").bind(input.upload.uploadId, object.objectId, input.chunkIndex, key, input.byteLength) : this.db.prepare(\"INSERT INTO upload_chunks(upload_id,object_id,chunk_index,r2_key,byte_length,data) VALUES (?1,?2,?3,?4,?5,?6)\").bind(input.upload.uploadId, object.objectId, input.chunkIndex, key, input.byteLength, input.bytes.slice());\n        await this.db.batch([\n          chunkStatement,\n          this.db.prepare(\"UPDATE upload_objects SET byte_size = byte_size + ?1 WHERE upload_id = ?2 AND object_id = ?3\").bind(input.byteLength, input.upload.uploadId, object.objectId)\n        ]);\n      } catch (error) {\n        await this.bucket?.delete(key).catch(() => void 0);\n        throw error;\n      }\n      object.byteSize += input.byteLength;\n    }\n    const count = await this.db.prepare(\"SELECT COUNT(*) AS count FROM upload_chunks WHERE upload_id = ?1 AND object_id = ?2\").bind(input.upload.uploadId, object.objectId).first();\n    return { object, chunk: { uploadId: input.upload.uploadId, objectId: object.objectId, chunkIndex: input.chunkIndex, byteLength: input.byteLength, bytes: input.bytes.slice() }, receivedChunks: Number(count?.count || 0) };\n  }\n  async listUploadObjects(uploadId) {\n    const result = await this.db.prepare(\"SELECT * FROM upload_objects WHERE upload_id = ?1 ORDER BY path\").bind(uploadId).all();\n    return (result.results || []).map((row) => this.uploadObject(row));\n  }\n  async listUploadChunks(uploadId, objectId) {\n    const result = await this.db.prepare(\"SELECT * FROM upload_chunks WHERE upload_id = ?1 AND object_id = ?2 ORDER BY chunk_index\").bind(uploadId, objectId).all();\n    const chunks = [];\n    for (const row of result.results || []) {\n      const bytes = this.bucket ? await this.readR2Chunk(String(row.r2_key), \"Stored upload object is missing\") : this.d1ChunkBytes(row, \"Stored upload object is missing\");\n      chunks.push({ uploadId, objectId, chunkIndex: Number(row.chunk_index), byteLength: Number(row.byte_length), bytes });\n    }\n    return chunks;\n  }\n  async commitUpload(uploadId, input) {\n    const upload = await this.getUpload(uploadId);\n    if (!upload) throw new ServiceError(404, \"NOT_FOUND\", \"Upload not found\");\n    const previous = await this.db.prepare(\"SELECT * FROM sites WHERE site_id = ?1\").bind(upload.siteId).first();\n    const oldKeys = previous ? await this.db.prepare(\"SELECT r2_key FROM object_chunks WHERE site_id = ?1\").bind(upload.siteId).all() : { results: [] };\n    const paths = (await this.listUploadObjects(uploadId)).map((object) => object.path).sort();\n    const resultJson = JSON.stringify({ siteId: upload.siteId, revision: upload.revision, uploadedPaths: paths });\n    const statements = [\n      this.db.prepare(\"INSERT INTO sites(site_id,account_id,title,source_path,current_revision,byte_size,object_count,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(site_id) DO UPDATE SET title=excluded.title,source_path=excluded.source_path,current_revision=excluded.current_revision,byte_size=excluded.byte_size,object_count=excluded.object_count,updated_at=excluded.updated_at\").bind(upload.siteId, upload.accountId, upload.title, upload.sourcePath, upload.revision, input.byteSize, input.objectCount, input.now, input.now),\n      this.db.prepare(\"INSERT OR IGNORE INTO revisions(site_id,revision,created_at) VALUES (?1,?2,?3)\").bind(upload.siteId, upload.revision, input.now),\n      this.db.prepare(\"INSERT OR IGNORE INTO objects(site_id,revision,object_id,kind,path,content_type,encoding,chunk_count,byte_size) SELECT ?1,?2,object_id,kind,path,content_type,encoding,chunk_count,byte_size FROM upload_objects WHERE upload_id = ?3\").bind(upload.siteId, upload.revision, uploadId),\n      (this.bucket ? this.db.prepare(\"INSERT OR IGNORE INTO object_chunks(site_id,revision,object_id,chunk_index,r2_key,byte_length) SELECT ?1,?2,object_id,chunk_index,r2_key,byte_length FROM upload_chunks WHERE upload_id = ?3\") : this.db.prepare(\"INSERT OR IGNORE INTO object_chunks(site_id,revision,object_id,chunk_index,r2_key,byte_length,data) SELECT ?1,?2,object_id,chunk_index,r2_key,byte_length,data FROM upload_chunks WHERE upload_id = ?3\")).bind(upload.siteId, upload.revision, uploadId),\n      this.db.prepare(\"DELETE FROM object_chunks WHERE site_id = ?1 AND revision <> ?2\").bind(upload.siteId, upload.revision),\n      this.db.prepare(\"DELETE FROM objects WHERE site_id = ?1 AND revision <> ?2\").bind(upload.siteId, upload.revision),\n      this.db.prepare(\"DELETE FROM revisions WHERE site_id = ?1 AND revision <> ?2\").bind(upload.siteId, upload.revision),\n      this.db.prepare(\"UPDATE uploads SET status='committed', result_json=?1 WHERE upload_id=?2 AND status='open'\").bind(resultJson, uploadId),\n      this.db.prepare(\"DELETE FROM upload_chunks WHERE upload_id = ?1\").bind(uploadId),\n      this.db.prepare(\"DELETE FROM upload_objects WHERE upload_id = ?1\").bind(uploadId)\n    ];\n    await this.db.batch(statements);\n    await this.deleteKeys((oldKeys.results || []).map((row) => row.r2_key));\n    return await this.getSite(upload.accountId, upload.siteId);\n  }\n  async expireUploads(now) {\n    const rows = await this.db.prepare(\"SELECT upload_id FROM uploads WHERE status='open' AND expires_at <= ?1\").bind(now).all();\n    if ((rows.results || []).length === 0) return 0;\n    const ids = (rows.results || []).map((row) => row.upload_id);\n    const keys = await this.db.prepare(`SELECT r2_key FROM upload_chunks WHERE upload_id IN (${ids.map(() => \"?\").join(\",\")})`).bind(...ids).all();\n    await this.db.batch(ids.map((id) => this.db.prepare(\"DELETE FROM uploads WHERE upload_id = ?1 AND status='open'\").bind(id)));\n    await this.deleteKeys((keys.results || []).map((row) => row.r2_key));\n    return ids.length;\n  }\n  async getViewerObject(siteId, path) {\n    const site = this.site(await this.db.prepare(\"SELECT * FROM sites WHERE site_id = ?1\").bind(siteId).first());\n    if (!site) return void 0;\n    const object = this.publishedObject(await this.db.prepare(\"SELECT * FROM objects WHERE site_id = ?1 AND revision = ?2 AND path = ?3\").bind(siteId, site.currentRevision, path).first(), siteId, site.currentRevision);\n    if (!object) return void 0;\n    const rows = await this.db.prepare(\"SELECT * FROM object_chunks WHERE site_id = ?1 AND revision = ?2 AND object_id = ?3 ORDER BY chunk_index\").bind(siteId, site.currentRevision, object.objectId).all();\n    const bucket = this.bucket;\n    const chunkRows = rows.results || [];\n    const chunks = (async function* () {\n      for (const row of chunkRows) {\n        if (!bucket) {\n          yield d1BlobBytes(row.data, \"Stored published object is missing\");\n          continue;\n        }\n        const stored = await bucket.get(String(row.r2_key));\n        if (!stored) throw new ServiceError(500, \"INTERNAL_ERROR\", \"Stored published object is missing\");\n        if (stored.body) {\n          const reader = stored.body.getReader();\n          while (true) {\n            const next = await reader.read();\n            if (next.done) break;\n            if (next.value) yield next.value;\n          }\n        } else {\n          yield new Uint8Array(await stored.arrayBuffer());\n        }\n      }\n    })();\n    return { site, object: { ...object, siteId, revision: site.currentRevision }, chunks };\n  }\n  async cleanupOrphanedObjects(_now) {\n    const old = await this.db.prepare(\"SELECT oc.r2_key FROM object_chunks oc JOIN sites s ON s.site_id = oc.site_id WHERE oc.revision <> s.current_revision\").all();\n    const expired = await this.db.prepare(\"SELECT uc.r2_key FROM upload_chunks uc JOIN uploads u ON u.upload_id = uc.upload_id WHERE u.status='expired'\").all();\n    const keys = [...old.results || [], ...expired.results || []].map((row) => row.r2_key);\n    const listed = this.bucket?.list ? await this.bucket.list({ prefix: \"tenants/\" }) : void 0;\n    if (listed) {\n      const active = await this.db.prepare(\"SELECT r2_key FROM object_chunks UNION SELECT uc.r2_key FROM upload_chunks uc JOIN uploads u ON u.upload_id=uc.upload_id WHERE u.status='open'\").all();\n      const activeKeys = new Set((active.results || []).map((row) => row.r2_key));\n      for (const object of listed.objects || []) if (!activeKeys.has(object.key)) keys.push(object.key);\n    }\n    await this.db.batch([\n      this.db.prepare(\"DELETE FROM object_chunks WHERE EXISTS (SELECT 1 FROM sites s WHERE s.site_id=object_chunks.site_id AND object_chunks.revision <> s.current_revision)\"),\n      this.db.prepare(\"DELETE FROM upload_chunks WHERE upload_id IN (SELECT upload_id FROM uploads WHERE status='expired')\"),\n      this.db.prepare(\"DELETE FROM upload_objects WHERE upload_id IN (SELECT upload_id FROM uploads WHERE status='expired')\"),\n      this.db.prepare(\"DELETE FROM uploads WHERE status='expired'\")\n    ]);\n    const uniqueKeys = [...new Set(keys)];\n    await this.deleteKeys(uniqueKeys);\n    return uniqueKeys.length;\n  }\n  async createDeviceAuthorization(record) {\n    await this.db.prepare(\"INSERT INTO device_authorizations(id,device_code_hash,status,created_at,expires_at,token_name) VALUES (?1,?2,?3,?4,?5,?6)\").bind(record.id, record.deviceCodeHash, record.status, record.createdAt, record.expiresAt, record.tokenName || null).run();\n  }\n  async getDeviceAuthorization(deviceCodeHash) {\n    return this.device(await this.db.prepare(\"SELECT * FROM device_authorizations WHERE device_code_hash = ?1\").bind(deviceCodeHash).first());\n  }\n  async approveDeviceAuthorization(deviceCodeHash, accountId, _tokenId, tokenName, now = (/* @__PURE__ */ new Date()).toISOString()) {\n    const result = await this.db.prepare(\"UPDATE device_authorizations SET account_id=?1,status='approved',token_name=?2 WHERE device_code_hash=?3 AND status='pending' AND expires_at > ?4\").bind(accountId, tokenName, deviceCodeHash, now).run();\n    return Number(result.meta?.changes || 0) === 1;\n  }\n  async consumeApprovedDeviceAuthorization(deviceCodeHash) {\n    const now = (/* @__PURE__ */ new Date()).toISOString();\n    const result = await this.db.prepare(\"UPDATE device_authorizations SET consumed_at=?1 WHERE device_code_hash=?2 AND status='approved' AND consumed_at IS NULL\").bind(now, deviceCodeHash).run();\n    if (Number(result.meta?.changes || 0) !== 1) return void 0;\n    return this.device(await this.db.prepare(\"SELECT * FROM device_authorizations WHERE device_code_hash = ?1\").bind(deviceCodeHash).first());\n  }\n  async isBootstrapConsumed() {\n    const row = await this.db.prepare(\"SELECT consumed_at FROM bootstrap_state WHERE id=1\").first();\n    return Boolean(row?.consumed_at);\n  }\n  async consumeBootstrap(now) {\n    const result = await this.db.prepare(\"UPDATE bootstrap_state SET consumed_at=?1 WHERE id=1 AND consumed_at IS NULL\").bind(now).run();\n    return Number(result.meta?.changes || 0) === 1;\n  }\n  async deleteKeys(keys) {\n    if (keys.length > 0 && this.bucket) await this.bucket.delete(keys);\n  }\n  async readR2Chunk(key, message) {\n    const stored = await this.bucket.get(key);\n    if (!stored) throw new ServiceError(500, \"INTERNAL_ERROR\", message);\n    return new Uint8Array(await stored.arrayBuffer());\n  }\n  d1ChunkBytes(row, message) {\n    return d1BlobBytes(row.data, message);\n  }\n  r2Key(upload, objectId, chunkIndex) {\n    return `tenants/${upload.accountId || this.tenantId}/sites/${upload.siteId}/revisions/${upload.revision}/objects/${objectId}/chunks/${chunkIndex}`;\n  }\n  account(row) {\n    return row ? { id: String(row.id), email: String(row.email), passwordHash: String(row.password_hash), createdAt: String(row.created_at) } : void 0;\n  }\n  recovery(row) {\n    return row ? { id: String(row.id), accountId: String(row.account_id), codeHash: String(row.code_hash), createdAt: String(row.created_at), usedAt: row.used_at ? String(row.used_at) : void 0 } : void 0;\n  }\n  session(row) {\n    return row ? { id: String(row.id), accountId: String(row.account_id), createdAt: String(row.created_at), expiresAt: String(row.expires_at) } : void 0;\n  }\n  token(row) {\n    return row ? { id: String(row.id), accountId: String(row.account_id), name: String(row.name), tokenHash: String(row.token_hash), scope: String(row.scope), createdAt: String(row.created_at), lastUsedAt: row.last_used_at ? String(row.last_used_at) : void 0, expiresAt: row.expires_at ? String(row.expires_at) : void 0, revokedAt: row.revoked_at ? String(row.revoked_at) : void 0 } : void 0;\n  }\n  site(row) {\n    return row ? { siteId: String(row.site_id), accountId: String(row.account_id), title: String(row.title), sourcePath: String(row.source_path), currentRevision: Number(row.current_revision), byteSize: Number(row.byte_size), objectCount: Number(row.object_count), createdAt: String(row.created_at), updatedAt: String(row.updated_at) } : void 0;\n  }\n  upload(row) {\n    if (!row) return void 0;\n    return { uploadId: String(row.upload_id), accountId: String(row.account_id), siteId: String(row.site_id), revision: Number(row.revision), sourcePath: String(row.source_path), title: String(row.title), idempotencyKey: String(row.idempotency_key), formatVersion: 1, chunkProtocolVersion: 2, expectedChunkCount: Number(row.expected_chunk_count), expectedObjectCount: Number(row.expected_object_count), declaredBytes: Number(row.declared_bytes), status: String(row.status), createdAt: String(row.created_at), expiresAt: String(row.expires_at), result: row.result_json ? JSON.parse(String(row.result_json)) : void 0 };\n  }\n  uploadObject(row) {\n    return row ? { uploadId: String(row.upload_id), objectId: String(row.object_id), kind: String(row.kind), path: String(row.path), contentType: String(row.content_type), encoding: String(row.encoding), chunkCount: Number(row.chunk_count), byteSize: Number(row.byte_size) } : void 0;\n  }\n  publishedObject(row, siteId, revision) {\n    return row ? { siteId, revision, uploadId: \"\", objectId: String(row.object_id), kind: String(row.kind), path: String(row.path), contentType: String(row.content_type), encoding: String(row.encoding), chunkCount: Number(row.chunk_count), byteSize: Number(row.byte_size) } : void 0;\n  }\n  device(row) {\n    return row ? { id: String(row.id), deviceCodeHash: String(row.device_code_hash), accountId: row.account_id ? String(row.account_id) : void 0, status: String(row.status), createdAt: String(row.created_at), expiresAt: String(row.expires_at), consumedAt: row.consumed_at ? String(row.consumed_at) : void 0, tokenName: row.token_name ? String(row.token_name) : void 0 } : void 0;\n  }\n};\nfunction bytesEqual(left, right) {\n  return left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);\n}\nfunction d1BlobBytes(value, message) {\n  if (Array.isArray(value)) {\n    for (const byte of value) {\n      if (!Number.isInteger(byte) || byte < 0 || byte > 255) throw new ServiceError(500, \"INTERNAL_ERROR\", message);\n    }\n    return Uint8Array.from(value);\n  }\n  if (value instanceof Uint8Array) return value.slice();\n  if (value instanceof ArrayBuffer) return new Uint8Array(value);\n  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();\n  throw new ServiceError(500, \"INTERNAL_ERROR\", message);\n}\n\n// server/worker/env.ts\nfunction createService(env, request) {\n  const publicBaseUrl = String(env.PUBLIC_BASE_URL || new URL(request.url).origin).replace(/\\/$/, \"\");\n  return new PublishService({ storage: new CloudflareD1R2Storage(env.DB, env.CONTENTS, \"default\"), publicBaseUrl, bootstrapSecret: env.BOOTSTRAP_SECRET });\n}\n\n// server/console/pages.ts\nfunction escapeHtml(value) {\n  return String(value ?? \"\").replaceAll(\"&\", \"&amp;\").replaceAll(\"<\", \"&lt;\").replaceAll(\">\", \"&gt;\").replaceAll('\"', \"&quot;\").replaceAll(\"'\", \"&#39;\");\n}\nfunction page(title, body, options = {}) {\n  const nav = options.session ? `<nav><a href=\"/account/usage\">Usage</a> \\xB7 <a href=\"/account/tokens\">Tokens</a> \\xB7 <a href=\"/account/sites\">Sites</a><form method=\"post\" action=\"/logout\" style=\"display:inline\"><button>Log out</button></form></nav>` : \"\";\n  return `<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>${escapeHtml(title)} \\xB7 One-Click Publish</title><style>body{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.5;color:#202124}label{display:block;margin:14px 0 4px}input{width:100%;max-width:420px;padding:9px;border:1px solid #bbb;border-radius:6px}button{margin-top:16px;padding:9px 14px;border:0;border-radius:6px;background:#5b4bdb;color:white;cursor:pointer}nav{margin-bottom:28px}nav form button{background:none;color:#5b4bdb;padding:0;margin:0}code{background:#f1f1f1;padding:3px 5px;border-radius:4px;word-break:break-all}.card{border:1px solid #ddd;border-radius:8px;padding:18px;margin:16px 0}.warning{background:#fff4d6;padding:12px;border-radius:6px}</style></head><body>${nav}${body}</body></html>`;\n}\nfunction formField(name, label, type = \"text\", required = true) {\n  return `<label for=\"${escapeHtml(name)}\">${escapeHtml(label)}</label><input id=\"${escapeHtml(name)}\" name=\"${escapeHtml(name)}\" type=\"${escapeHtml(type)}\"${required ? \" required\" : \"\"}>`;\n}\nfunction recoveryPage(recoveryCode2, next = \"/login\") {\n  return page(\"Save your recovery code\", `<h1>Save your recovery code</h1><p>This code is shown once. Store it somewhere safe before continuing.</p><p class=\"warning\"><code>${escapeHtml(recoveryCode2)}</code></p><p><a href=\"${escapeHtml(next)}\">Continue</a></p>`);\n}\n\n// server/worker/routes.ts\nvar JSON_HEADERS = { \"content-type\": \"application/json; charset=utf-8\", \"cache-control\": \"no-store\" };\nasync function routeRequest(context) {\n  const { request, service } = context;\n  const url = new URL(request.url);\n  if (request.method === \"OPTIONS\") return new Response(null, { status: 204, headers: { \"access-control-allow-origin\": \"*\", \"access-control-allow-headers\": \"authorization,content-type\", \"access-control-allow-methods\": \"GET,POST,DELETE,OPTIONS\" } });\n  try {\n    if (request.method === \"GET\" && url.pathname === \"/healthz\") return json({\n      status: \"ok\",\n      service: \"publish-note\",\n      version: String(context.env.PUBLISH_NOTE_VERSION || \"unknown\"),\n      storage: context.env.CONTENTS ? \"cloudflare-d1-r2\" : \"cloudflare-d1\"\n    });\n    if (url.pathname.startsWith(\"/s/\")) return await viewerResponse(service, request, url);\n    if (url.pathname === \"/connect\" && request.method === \"GET\") return await connectPage(context);\n    if (url.pathname === \"/connect/approve\" && request.method === \"POST\") return await approveConnect(context);\n    if (url.pathname === \"/__internal/provision/initialize\" && request.method === \"POST\") return await initializeProvisioning(context);\n    if (url.pathname === \"/__internal/provision/reconnect\" && request.method === \"POST\") return await reconnectProvisioning(context);\n    if (url.pathname === \"/setup\") return await setupPage(context);\n    if (url.pathname === \"/login\") return await loginPage(context);\n    if (url.pathname === \"/register\") return await registerPage(context);\n    if (url.pathname === \"/recover\") return await recoverPage(context);\n    if (url.pathname === \"/logout\" && request.method === \"POST\") return await logoutPage(context);\n    if (url.pathname.startsWith(\"/account\")) return await accountPage(context);\n    if (url.pathname.startsWith(\"/v1/\")) return await apiRequest(context);\n    return new Response(\"Not Found\", { status: 404 });\n  } catch (error) {\n    if (url.pathname.startsWith(\"/v1/\") || url.pathname === \"/healthz\" || url.pathname === \"/__internal/provision/initialize\" || url.pathname === \"/__internal/provision/reconnect\") return jsonError(error);\n    const normalized = asServiceError(error);\n    return new Response(page(\"Error\", `<h1>Request failed</h1><p>${escapeHtml(normalized.message)}</p>`), { status: normalized.status, headers: { \"content-type\": \"text/html; charset=utf-8\" } });\n  }\n}\nasync function initializeProvisioning(context) {\n  const input = await readJson(context.request);\n  const secret = context.request.headers.get(\"x-publish-note-bootstrap-secret\") || \"\";\n  const result = await context.service.initializeProvisioning({\n    provisionSecret: secret,\n    ownerKey: String(input.ownerKey || context.request.headers.get(\"x-publish-note-owner-key\") || \"\"),\n    expiresAt: String(input.expiresAt || context.request.headers.get(\"x-publish-note-expires-at\") || \"\"),\n    signature: String(input.signature || context.request.headers.get(\"x-publish-note-signature\") || \"\"),\n    tokenName: String(input.tokenName || \"Obsidian plugin\")\n  });\n  return json(result, 201);\n}\nasync function reconnectProvisioning(context) {\n  const input = await readJson(context.request);\n  const secret = context.request.headers.get(\"x-publish-note-bootstrap-secret\") || \"\";\n  const result = await context.service.reconnectProvisioning({\n    provisionSecret: secret,\n    ownerKey: String(input.ownerKey || context.request.headers.get(\"x-publish-note-owner-key\") || \"\"),\n    expiresAt: String(input.expiresAt || context.request.headers.get(\"x-publish-note-expires-at\") || \"\"),\n    signature: String(input.signature || context.request.headers.get(\"x-publish-note-signature\") || \"\"),\n    tokenName: String(input.tokenName || \"Obsidian plugin\")\n  });\n  return json(result, 200);\n}\nasync function apiRequest(context) {\n  const { request, service } = context;\n  const url = new URL(request.url);\n  if (request.method === \"POST\" && url.pathname === \"/v1/auth/register\") {\n    const result = await service.register(await readJson(request));\n    return json({ account: publicAccount(result.account), recoveryCode: result.recoveryCode }, 201);\n  }\n  if (request.method === \"POST\" && url.pathname === \"/v1/auth/login\") {\n    const result = await service.login(await readJson(request));\n    const response = json({ account: publicAccount(result.account) });\n    response.headers.set(\"set-cookie\", sessionCookie(result.session.id, request));\n    return response;\n  }\n  if (request.method === \"POST\" && url.pathname === \"/v1/auth/logout\") {\n    await service.logout(parseCookie(request.headers.get(\"cookie\"), \"pn_session\"));\n    const response = json({ ok: true });\n    response.headers.set(\"set-cookie\", clearCookie(request));\n    return response;\n  }\n  if (request.method === \"GET\" && url.pathname === \"/v1/me\") return json({ account: publicAccount((await requireSession(context)).account) });\n  if (request.method === \"POST\" && url.pathname === \"/v1/auth/device/start\") return json(await service.startDeviceAuthorization());\n  if (request.method === \"POST\" && url.pathname === \"/v1/auth/device/poll\") return json(await service.pollDeviceAuthorization(String((await readJson(request)).deviceCode || \"\")));\n  if (request.method === \"POST\" && url.pathname === \"/v1/auth/device/approve\") {\n    const session2 = await requireSession(context);\n    const input = await readJson(request);\n    await service.approveDeviceAuthorization(session2, String(input.deviceCode || \"\"), input.tokenName);\n    return json({ ok: true });\n  }\n  if (request.method === \"POST\" && url.pathname === \"/v1/account/recover\") {\n    await service.recover(await readJson(request));\n    return json({ ok: true });\n  }\n  const sessionRoutes = url.pathname === \"/v1/tokens\" || url.pathname === \"/v1/usage\" || url.pathname === \"/v1/sites\" || /^\\/v1\\/tokens\\/[^/]+\\/revoke$/.test(url.pathname) || request.method === \"DELETE\" && /^\\/v1\\/sites\\/[^/]+$/.test(url.pathname);\n  const session = sessionRoutes ? await requireSession(context) : void 0;\n  if (session && request.method === \"GET\" && url.pathname === \"/v1/tokens\") return json({ tokens: await service.listTokens(session) });\n  if (session && request.method === \"POST\" && url.pathname === \"/v1/tokens\") {\n    const input = await readJson(request);\n    return json(await service.createToken(session.account.id, String(input.name || \"Obsidian plugin\"), input.expiresAt));\n  }\n  if (session && request.method === \"POST\" && /^\\/v1\\/tokens\\/[^/]+\\/revoke$/.test(url.pathname)) {\n    await service.revokeToken(session, decodeURIComponent(url.pathname.split(\"/\")[3]));\n    return json({ ok: true });\n  }\n  if (session && request.method === \"GET\" && url.pathname === \"/v1/usage\") return json(await usagePayload(service, session.account.id));\n  if (session && request.method === \"GET\" && url.pathname === \"/v1/sites\") return json({ sites: await service.listSites(session.account.id) });\n  if (session && request.method === \"DELETE\" && /^\\/v1\\/sites\\/[^/]+$/.test(url.pathname)) {\n    await service.deleteSite(session, decodeURIComponent(url.pathname.split(\"/\")[3]));\n    return json({ ok: true });\n  }\n  const token = await service.authenticatePublishToken(parseBearer(request.headers.get(\"authorization\")));\n  if (request.method === \"POST\" && url.pathname === \"/v1/sites/uploads\") return json(await service.startUpload(token, await readJson(request)));\n  const chunkMatch = /^\\/v1\\/uploads\\/([^/]+)\\/chunks$/.exec(url.pathname);\n  if (request.method === \"POST\" && chunkMatch) return json(await service.uploadChunk(token, { ...await readJson(request), uploadId: decodeURIComponent(chunkMatch[1]) }));\n  const commitMatch = /^\\/v1\\/uploads\\/([^/]+)\\/commit$/.exec(url.pathname);\n  if (request.method === \"POST\" && commitMatch) return json(await service.commitUpload(token, decodeURIComponent(commitMatch[1]), new URL(request.url).origin));\n  throw new ServiceError(404, \"NOT_FOUND\", \"Not found\");\n}\nasync function viewerResponse(service, request, url) {\n  const match = /^\\/s\\/([^/]+)(\\/.*)?$/.exec(url.pathname);\n  if (!match) throw new ServiceError(404, \"NOT_FOUND\", \"Not found\");\n  const siteId = decodeURIComponent(match[1]);\n  const path = viewerPath(siteId, url.pathname);\n  const value = await service.viewer(siteId, path);\n  if (!value) return new Response(\"Not Found\", { status: 404, headers: { \"content-type\": \"text/plain; charset=utf-8\" } });\n  const stream = new ReadableStream({\n    async start(controller) {\n      try {\n        for await (const chunk of value.chunks) controller.enqueue(chunk);\n        controller.close();\n      } catch (error) {\n        controller.error(error);\n      }\n    }\n  });\n  return new Response(stream, { status: 200, headers: { \"content-type\": value.object.contentType, \"cache-control\": \"no-cache\" } });\n}\nasync function requireSession(context) {\n  const session = await context.service.accountForSession(parseCookie(context.request.headers.get(\"cookie\"), \"pn_session\"));\n  if (!session) throw new ServiceError(401, \"UNAUTHORIZED\", \"Sign in required\");\n  return session;\n}\nasync function connectPage(context) {\n  const code = new URL(context.request.url).searchParams.get(\"code\") || \"\";\n  if (!code) return html(\"Connect One-Click Publish\", `<h1>Connect One-Click Publish</h1><p>This link is missing a device code.</p>`);\n  const session = await context.service.accountForSession(parseCookie(context.request.headers.get(\"cookie\"), \"pn_session\"));\n  const next = `/connect?code=${code}`;\n  if (!session) return html(\"Connect One-Click Publish\", `<h1>Connect One-Click Publish</h1><p>Sign in before approving this Obsidian plugin connection.</p><p><a href=\"/login?next=${encodeURIComponent(next)}\">Sign in</a> \\xB7 <a href=\"/register?next=${encodeURIComponent(next)}\">Create an account</a></p>`);\n  return html(\"Approve connection\", `<h1>Approve connection</h1><p>Allow this Obsidian plugin to publish notes for <strong>${escapeHtml(session.account.email)}</strong>?</p><form method=\"post\" action=\"/connect/approve\"><input type=\"hidden\" name=\"deviceCode\" value=\"${escapeHtml(code)}\">${formField(\"tokenName\", \"Token name\", \"text\", false)}<button>Allow publishing</button></form>`);\n}\nasync function approveConnect(context) {\n  const session = await requireSession(context);\n  const form = await readForm(context.request);\n  await context.service.approveDeviceAuthorization(session, String(form.deviceCode || \"\"), String(form.tokenName || \"Obsidian plugin\"));\n  return html(\"Connected\", `<h1>Connected</h1><p>You can return to Obsidian. The plugin will finish connecting automatically.</p>`);\n}\nasync function setupPage(context) {\n  if (!context.service.bootstrapConfigured()) return html(\"Setup unavailable\", `<h1>Setup unavailable</h1><p>This Worker has no BOOTSTRAP_SECRET configured.</p>`, 503);\n  if (context.request.method === \"GET\") return html(\"First-time setup\", `<h1>First-time setup</h1><p>This creates the first account. The bootstrap secret is single-use and is never shown again.</p><form method=\"post\" action=\"/setup\">${formField(\"bootstrapSecret\", \"Bootstrap secret\", \"password\")}${formField(\"email\", \"Email\", \"email\")}${formField(\"password\", \"Password (10+ characters)\", \"password\")}<button>Create account</button></form>`);\n  const form = await readForm(context.request);\n  const result = await context.service.setup({ bootstrapSecret: String(form.bootstrapSecret || \"\"), email: String(form.email || \"\"), password: String(form.password || \"\") });\n  return new Response(recoveryPage(result.recoveryCode), { status: 201, headers: { \"content-type\": \"text/html; charset=utf-8\" } });\n}\nasync function loginPage(context) {\n  if (context.request.method === \"GET\") {\n    const next = safeNext(new URL(context.request.url).searchParams.get(\"next\"));\n    return html(\"Sign in\", `<h1>Sign in</h1><form method=\"post\" action=\"/login\">${formField(\"email\", \"Email\", \"email\")}${formField(\"password\", \"Password\", \"password\")}<input type=\"hidden\" name=\"next\" value=\"${escapeHtml(next)}\"><button>Sign in</button></form><p><a href=\"/register?next=${encodeURIComponent(next)}\">Create an account</a> \\xB7 <a href=\"/recover\">Use recovery code</a></p>`);\n  }\n  const form = await readForm(context.request);\n  const result = await context.service.login({ email: String(form.email || \"\"), password: String(form.password || \"\") });\n  return new Response(null, { status: 302, headers: { location: safeNext(form.next), \"set-cookie\": sessionCookie(result.session.id, context.request) } });\n}\nasync function registerPage(context) {\n  if (context.request.method === \"GET\") {\n    const next = safeNext(new URL(context.request.url).searchParams.get(\"next\"));\n    return html(\"Create account\", `<h1>Create account</h1><p>Email verification is not required. Save the one-time recovery code shown after registration.</p><form method=\"post\" action=\"/register\">${formField(\"email\", \"Email\", \"email\")}${formField(\"password\", \"Password (10+ characters)\", \"password\")}<input type=\"hidden\" name=\"next\" value=\"${escapeHtml(next)}\"><button>Create account</button></form><p><a href=\"/login?next=${encodeURIComponent(next)}\">Sign in</a></p>`);\n  }\n  const form = await readForm(context.request);\n  const result = await context.service.register({ email: String(form.email || \"\"), password: String(form.password || \"\") });\n  return new Response(recoveryPage(result.recoveryCode, `/login?next=${encodeURIComponent(safeNext(form.next))}`), { status: 201, headers: { \"content-type\": \"text/html; charset=utf-8\" } });\n}\nasync function recoverPage(context) {\n  if (context.request.method === \"GET\") return html(\"Recover account\", `<h1>Recover account</h1><p>Recovery revokes all existing sessions and Publish Tokens.</p><form method=\"post\" action=\"/recover\">${formField(\"email\", \"Email\", \"email\")}${formField(\"recoveryCode\", \"Recovery code\")}${formField(\"newPassword\", \"New password (10+ characters)\", \"password\")}<button>Reset password</button></form>`);\n  const form = await readForm(context.request);\n  await context.service.recover({ email: String(form.email || \"\"), recoveryCode: String(form.recoveryCode || \"\"), newPassword: String(form.newPassword || \"\") });\n  return html(\"Password reset\", `<h1>Password reset</h1><p>All previous sessions and Publish Tokens were revoked. <a href=\"/login\">Sign in again</a>.</p>`);\n}\nasync function logoutPage(context) {\n  await context.service.logout(parseCookie(context.request.headers.get(\"cookie\"), \"pn_session\"));\n  return new Response(null, { status: 302, headers: { location: \"/login\", \"set-cookie\": clearCookie(context.request) } });\n}\nasync function accountPage(context) {\n  const session = await requireSession(context);\n  const path = new URL(context.request.url).pathname;\n  const revokeTokenMatch = /^\\/account\\/tokens\\/([^/]+)\\/revoke$/.exec(path);\n  if (revokeTokenMatch && context.request.method === \"POST\") {\n    await context.service.revokeToken(session, decodeURIComponent(revokeTokenMatch[1]));\n    return new Response(null, { status: 302, headers: { location: \"/account/tokens\" } });\n  }\n  const deleteSiteMatch = /^\\/account\\/sites\\/([^/]+)\\/delete$/.exec(path);\n  if (deleteSiteMatch && context.request.method === \"POST\") {\n    await context.service.deleteSite(session, decodeURIComponent(deleteSiteMatch[1]));\n    return new Response(null, { status: 302, headers: { location: \"/account/sites\" } });\n  }\n  if (path === \"/account/tokens\") {\n    if (context.request.method === \"POST\") {\n      const form = await readForm(context.request);\n      const created = await context.service.createToken(session.account.id, String(form.name || \"Obsidian plugin\"));\n      return html(\"Token created\", `<h1>Token created</h1><p>Copy this token now. It will not be shown again.</p><p class=\"warning\"><code>${escapeHtml(created.token)}</code></p><p><a href=\"/account/tokens\">Back to tokens</a></p>`);\n    }\n    const tokens = await context.service.listTokens(session);\n    return html(\"Tokens\", `<h1>Publish Tokens</h1><p>Full token values are never shown after creation.</p><form method=\"post\" action=\"/account/tokens\">${formField(\"name\", \"Token name\", \"text\", false)}<button>Create token</button></form>${tokens.map((token) => `<div class=\"card\"><strong>${escapeHtml(token.name)}</strong><br>Created: ${escapeHtml(token.createdAt)}<br>Last used: ${escapeHtml(token.lastUsedAt || \"Never\")}<br>Status: ${escapeHtml(token.revokedAt ? \"Revoked\" : token.expiresAt && Date.parse(token.expiresAt) <= Date.now() ? \"Expired\" : \"Active\")} ${token.revokedAt ? \"\" : `<form method=\"post\" action=\"/account/tokens/${encodeURIComponent(token.id)}/revoke\"><button>Revoke</button></form>`}</div>`).join(\"\")}`, { session: true });\n  }\n  if (path === \"/account/sites\") {\n    const sites = await context.service.listSites(session.account.id);\n    return html(\"Sites\", `<h1>Published Notes</h1>${sites.map((site) => `<div class=\"card\"><strong>${escapeHtml(site.title)}</strong><br><a href=\"/s/${encodeURIComponent(site.siteId)}/\">${escapeHtml(siteUrlFor(context, site.siteId))}</a><br>Size: ${escapeHtml(site.byteSize)} bytes \\xB7 Updated: ${escapeHtml(site.updatedAt)}<form method=\"post\" action=\"/account/sites/${encodeURIComponent(site.siteId)}/delete\"><button>Delete site</button></form></div>`).join(\"\") || \"<p>No sites yet.</p>\"}`, { session: true });\n  }\n  const usage = await usagePayload(context.service, session.account.id);\n  return html(\"Usage\", `<h1>Usage</h1><p>Account: ${escapeHtml(session.account.email)}</p><div class=\"card\"><strong>${escapeHtml(usage.bytes)} bytes in current published content</strong><br>${escapeHtml(usage.siteCount)} published Notes<br>Service: ${escapeHtml(new URL(context.request.url).origin)}</div><p><a href=\"/account/tokens\">Manage tokens</a> \\xB7 <a href=\"/account/sites\">Manage sites</a></p>`, { session: true });\n}\nasync function usagePayload(service, accountId) {\n  const usage = await service.getUsage(accountId);\n  return { ...usage, sites: await service.listSites(accountId) };\n}\nfunction siteUrlFor(context, siteId) {\n  return `${new URL(context.request.url).origin}/s/${encodeURIComponent(siteId)}/`;\n}\nfunction publicAccount(account) {\n  return { id: account.id, email: account.email, createdAt: account.createdAt };\n}\nfunction json(value, status = 200) {\n  return new Response(JSON.stringify(value), { status, headers: JSON_HEADERS });\n}\nfunction html(title, body, statusOrOptions = 200, options = {}) {\n  const status = typeof statusOrOptions === \"number\" ? statusOrOptions : 200;\n  const pageOptions = typeof statusOrOptions === \"number\" ? options : statusOrOptions;\n  return new Response(page(title, body, pageOptions), { status, headers: { \"content-type\": \"text/html; charset=utf-8\" } });\n}\nasync function readJson(request) {\n  const bytes = new Uint8Array(await request.arrayBuffer());\n  if (bytes.byteLength > 4 * 1024 * 1024) throw new ServiceError(413, \"QUOTA_EXCEEDED\", \"Request body is too large\");\n  try {\n    return JSON.parse(new TextDecoder().decode(bytes));\n  } catch {\n    throw new ServiceError(400, \"BAD_REQUEST\", \"Invalid JSON\");\n  }\n}\nasync function readForm(request) {\n  const form = await request.formData();\n  return Object.fromEntries([...form.entries()].map(([key, value]) => [key, String(value)]));\n}\nfunction parseBearer(value) {\n  const match = /^Bearer\\s+(.+)$/i.exec(value || \"\");\n  return match?.[1];\n}\nfunction parseCookie(value, name) {\n  const item = (value || \"\").split(\";\").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));\n  return item ? decodeURIComponent(item.slice(name.length + 1)) : void 0;\n}\nfunction sessionCookie(value, request) {\n  const secure = new URL(request.url).protocol === \"https:\" ? \"; Secure\" : \"\";\n  return `pn_session=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${secure}`;\n}\nfunction clearCookie(request) {\n  const secure = new URL(request.url).protocol === \"https:\" ? \"; Secure\" : \"\";\n  return `pn_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;\n}\nfunction safeNext(value) {\n  const next = String(value || \"/account/usage\");\n  return next.startsWith(\"/\") && !next.startsWith(\"//\") ? next : \"/account/usage\";\n}\n\n// server/worker/index.ts\nvar index_default = {\n  async fetch(request, env, ctx) {\n    const service = createService(env, request);\n    return routeRequest({ service, request, env });\n  },\n  async scheduled(_controller, env, _ctx) {\n    await createService(env, new Request(\"https://worker.invalid/healthz\")).cleanup();\n  }\n};\nexport {\n  index_default as default\n};\n";
 const EMBEDDED_TARGET_MIGRATION_SQL = "-- 0001_initial.sql\nPRAGMA foreign_keys = ON;\n\nCREATE TABLE IF NOT EXISTS accounts (\n  id TEXT PRIMARY KEY,\n  email TEXT NOT NULL UNIQUE,\n  password_hash TEXT NOT NULL,\n  created_at TEXT NOT NULL\n);\nCREATE TABLE IF NOT EXISTS recovery_codes (\n  id TEXT PRIMARY KEY,\n  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,\n  code_hash TEXT NOT NULL,\n  created_at TEXT NOT NULL,\n  used_at TEXT\n);\nCREATE TABLE IF NOT EXISTS sessions (\n  id TEXT PRIMARY KEY,\n  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,\n  created_at TEXT NOT NULL,\n  expires_at TEXT NOT NULL\n);\nCREATE TABLE IF NOT EXISTS tokens (\n  id TEXT PRIMARY KEY,\n  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,\n  name TEXT NOT NULL,\n  token_hash TEXT NOT NULL UNIQUE,\n  scope TEXT NOT NULL,\n  created_at TEXT NOT NULL,\n  last_used_at TEXT,\n  expires_at TEXT,\n  revoked_at TEXT\n);\nCREATE TABLE IF NOT EXISTS sites (\n  site_id TEXT PRIMARY KEY,\n  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,\n  title TEXT NOT NULL,\n  source_path TEXT NOT NULL,\n  current_revision INTEGER NOT NULL,\n  byte_size INTEGER NOT NULL,\n  object_count INTEGER NOT NULL,\n  created_at TEXT NOT NULL,\n  updated_at TEXT NOT NULL\n);\nCREATE INDEX IF NOT EXISTS sites_account_idx ON sites(account_id);\nCREATE TABLE IF NOT EXISTS revisions (\n  site_id TEXT NOT NULL,\n  revision INTEGER NOT NULL,\n  created_at TEXT NOT NULL,\n  PRIMARY KEY (site_id, revision),\n  FOREIGN KEY (site_id) REFERENCES sites(site_id) ON DELETE CASCADE\n);\nCREATE TABLE IF NOT EXISTS objects (\n  site_id TEXT NOT NULL,\n  revision INTEGER NOT NULL,\n  object_id TEXT NOT NULL,\n  kind TEXT NOT NULL,\n  path TEXT NOT NULL,\n  content_type TEXT NOT NULL,\n  encoding TEXT NOT NULL,\n  chunk_count INTEGER NOT NULL,\n  byte_size INTEGER NOT NULL,\n  PRIMARY KEY (site_id, revision, object_id),\n  UNIQUE (site_id, revision, path),\n  FOREIGN KEY (site_id, revision) REFERENCES revisions(site_id, revision) ON DELETE CASCADE\n);\nCREATE TABLE IF NOT EXISTS object_chunks (\n  site_id TEXT NOT NULL,\n  revision INTEGER NOT NULL,\n  object_id TEXT NOT NULL,\n  chunk_index INTEGER NOT NULL,\n  r2_key TEXT NOT NULL,\n  byte_length INTEGER NOT NULL,\n  PRIMARY KEY (site_id, revision, object_id, chunk_index),\n  FOREIGN KEY (site_id, revision, object_id) REFERENCES objects(site_id, revision, object_id) ON DELETE CASCADE\n);\nCREATE TABLE IF NOT EXISTS uploads (\n  upload_id TEXT PRIMARY KEY,\n  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,\n  site_id TEXT NOT NULL,\n  revision INTEGER NOT NULL,\n  source_path TEXT NOT NULL,\n  title TEXT NOT NULL,\n  idempotency_key TEXT NOT NULL,\n  format_version INTEGER NOT NULL,\n  chunk_protocol_version INTEGER NOT NULL,\n  expected_chunk_count INTEGER NOT NULL,\n  expected_object_count INTEGER NOT NULL,\n  declared_bytes INTEGER NOT NULL,\n  status TEXT NOT NULL,\n  created_at TEXT NOT NULL,\n  expires_at TEXT NOT NULL,\n  result_json TEXT,\n  UNIQUE (account_id, idempotency_key)\n);\nCREATE INDEX IF NOT EXISTS uploads_expiry_idx ON uploads(status, expires_at);\nCREATE TABLE IF NOT EXISTS upload_objects (\n  upload_id TEXT NOT NULL REFERENCES uploads(upload_id) ON DELETE CASCADE,\n  object_id TEXT NOT NULL,\n  kind TEXT NOT NULL,\n  path TEXT NOT NULL,\n  content_type TEXT NOT NULL,\n  encoding TEXT NOT NULL,\n  chunk_count INTEGER NOT NULL,\n  byte_size INTEGER NOT NULL,\n  PRIMARY KEY (upload_id, object_id),\n  UNIQUE (upload_id, path)\n);\nCREATE TABLE IF NOT EXISTS upload_chunks (\n  upload_id TEXT NOT NULL,\n  object_id TEXT NOT NULL,\n  chunk_index INTEGER NOT NULL,\n  r2_key TEXT NOT NULL,\n  byte_length INTEGER NOT NULL,\n  PRIMARY KEY (upload_id, object_id, chunk_index),\n  FOREIGN KEY (upload_id, object_id) REFERENCES upload_objects(upload_id, object_id) ON DELETE CASCADE\n);\nCREATE TABLE IF NOT EXISTS device_authorizations (\n  id TEXT PRIMARY KEY,\n  device_code_hash TEXT NOT NULL UNIQUE,\n  account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,\n  status TEXT NOT NULL,\n  created_at TEXT NOT NULL,\n  expires_at TEXT NOT NULL,\n  consumed_at TEXT,\n  token_name TEXT\n);\nCREATE INDEX IF NOT EXISTS device_authorizations_expiry_idx ON device_authorizations(status, expires_at);\nCREATE TABLE IF NOT EXISTS bootstrap_state (\n  id INTEGER PRIMARY KEY CHECK (id = 1),\n  consumed_at TEXT\n);\nINSERT OR IGNORE INTO bootstrap_state(id, consumed_at) VALUES (1, NULL);\n\n\n-- 0002_d1_chunk_bodies.sql\n-- Personal D1-only Workers keep upload and published chunks in D1 BLOBs.\n-- Official and legacy R2-backed Workers leave both columns NULL.\nALTER TABLE object_chunks ADD COLUMN data BLOB;\nALTER TABLE upload_chunks ADD COLUMN data BLOB;\n";
 
 class CloudflareProvisioningError extends Error {
@@ -175,8 +176,10 @@ class CloudflareProvisioningError extends Error {
     this.providerCode = sanitizeProviderCode(details.providerCode);
     this.providerMessage = sanitizeExternalMessage(details.providerMessage);
     this.responseContentType = sanitizeExternalMessage(details.responseContentType);
+    this.causeMessage = sanitizeExternalMessage(details.causeMessage);
+    this.remoteOutcome = sanitizeProviderCode(details.remoteOutcome);
     this.outcomeUnknown = details.outcomeUnknown === true;
-    this.cleanupIncomplete = false;
+    this.cleanupIncomplete = details.cleanupIncomplete === true;
   }
 }
 
@@ -195,6 +198,15 @@ function randomUrlSecret(byteLength = 32) {
   if (!globalThis.crypto?.getRandomValues) throw new CloudflareProvisioningError("CRYPTO_UNAVAILABLE", "Secure random generation is unavailable");
   globalThis.crypto.getRandomValues(bytes);
   return bytesToBase64Url(bytes);
+}
+
+function createOperationId(kind = "operation") {
+  const safeKind = String(kind || "operation").replace(/[^a-z0-9_-]/gi, "-").slice(0, 32) || "operation";
+  return `${safeKind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function normalizeOperationId(value) {
+  return String(value || "").trim().replace(/[^a-z0-9._:-]/gi, "").slice(0, 96);
 }
 
 async function sha256Base64Url(value) {
@@ -256,7 +268,11 @@ function createLoopbackOAuthCallback(expectedState, timeoutMs = CLOUDFLARE_OAUTH
     if (oauthError) {
       response.statusCode = 400;
       response.end("Cloudflare authorization was denied. Return to Obsidian.");
-      finish(new CloudflareProvisioningError("OAUTH_DENIED", "Cloudflare authorization was denied"));
+      finish(new CloudflareProvisioningError("OAUTH_DENIED", "Cloudflare authorization was denied", {
+        stage: "authorization",
+        providerCode: oauthError,
+        providerMessage: url.searchParams.get("error_description") || "",
+      }));
       return;
     }
     const authorizationCode = String(url.searchParams.get("code") || "");
@@ -403,6 +419,44 @@ async function revokeCloudflareToken(accessToken, options = {}) {
   await deploymentRequest(`${CLOUDFLARE_OAUTH_BASE_URL}/oauth2/revoke`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: String(body) }, { stage: "authorization_cleanup", debugLog: options.debugLog });
 }
 
+async function authorizeCloudflareScope(scope, options = {}) {
+  const state = randomUrlSecret(32);
+  const codeVerifier = randomUrlSecret(32);
+  const codeChallenge = await sha256Base64Url(codeVerifier);
+  const callback = createLoopbackOAuthCallback(state);
+  try {
+    await callback.ready;
+    const authorization = new URL(`${CLOUDFLARE_OAUTH_BASE_URL}/oauth2/auth`);
+    authorization.searchParams.set("response_type", "code");
+    authorization.searchParams.set("client_id", CLOUDFLARE_OAUTH_CLIENT_ID);
+    authorization.searchParams.set("redirect_uri", CLOUDFLARE_OAUTH_REDIRECT_URI);
+    authorization.searchParams.set("scope", scope);
+    authorization.searchParams.set("state", state);
+    authorization.searchParams.set("code_challenge", codeChallenge);
+    authorization.searchParams.set("code_challenge_method", "S256");
+    openExternalUrl(authorization.toString());
+    const code = await callback.code;
+    const accessToken = await exchangeCloudflareCode(code, codeVerifier, options);
+    return { callback, accessToken };
+  } catch (error) {
+    options.debugLog?.({ type: "oauth_error", stage: "authorization", error });
+    callback.close();
+    await callback.closed;
+    throw error;
+  }
+}
+
+async function findCloudflareZone(accessToken, accountId, hostname, options = {}) {
+  const labels = normalizeCustomDomain(hostname).split(".");
+  for (let index = 0; index < labels.length - 1; index += 1) {
+    const candidate = labels.slice(index).join(".");
+    const zones = await cloudflareApiRequest(`/zones?account.id=${encodeURIComponent(accountId)}&name=${encodeURIComponent(candidate)}&per_page=50&page=1`, accessToken, {}, options);
+    const zone = findCloudflareZoneForHostname(hostname, zones);
+    if (zone) return zone;
+  }
+  return undefined;
+}
+
 function splitMigrationStatements(sql) {
   const withoutComments = String(sql || "").replace(/^\s*--.*$/gm, "");
   const statements = [];
@@ -512,7 +566,7 @@ async function initializePersonalWorker(serviceUrl, ownerKey, bootstrapSecret, e
     body: JSON.stringify({ ownerKey, expiresAt, signature, tokenName: "Obsidian plugin" }),
   }, { stage: "initialize", debugLog: options.debugLog });
   if (!payload.publishToken?.startsWith("pn_")) throw new CloudflareProvisioningError("INVALID_RESPONSE", "Initialization result is incomplete", { stage: "initialize", outcomeUnknown: true });
-  return { serviceUrl, publishToken: String(payload.publishToken) };
+  return { serviceUrl, publishToken: String(payload.publishToken), workerName: options.workerName || workerNameFromServiceUrl(serviceUrl) };
 }
 
 async function provisionPersonalCloudflare(accessToken, onStatus = () => {}, options = {}) {
@@ -578,6 +632,7 @@ async function provisionPersonalCloudflare(accessToken, onStatus = () => {}, opt
         { name: "DB", type: "d1", id: databaseId },
         { name: "BOOTSTRAP_SECRET", type: "secret_text", text: bootstrapSecret },
         { name: "PUBLIC_BASE_URL", type: "plain_text", text: serviceUrl },
+        { name: "PUBLISH_NOTE_VERSION", type: "plain_text", text: EMBEDDED_TARGET_PLUGIN_VERSION },
       ],
     };
     step("worker_upload");
@@ -599,7 +654,9 @@ async function provisionPersonalCloudflare(accessToken, onStatus = () => {}, opt
     for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
         const health = await deploymentRequest(`${serviceUrl}/healthz`, {}, { stage, debugLog: options.debugLog });
-        if (health.status !== "ok" || health.service !== "publish-note") throw new CloudflareProvisioningError("INVALID_RESPONSE", "Worker health response is invalid", { stage });
+        if (health.status !== "ok" || health.service !== "publish-note" || String(health.version || "") !== EMBEDDED_TARGET_PLUGIN_VERSION) {
+          throw new CloudflareProvisioningError("WORKER_VERSION_MISMATCH", "Worker version does not match this plugin", { stage });
+        }
         ready = true;
         break;
       } catch (error) {
@@ -611,7 +668,7 @@ async function provisionPersonalCloudflare(accessToken, onStatus = () => {}, opt
     step("initialize");
     const expiresAt = new Date(Date.now() + CLOUDFLARE_BOOTSTRAP_TIMEOUT_MS).toISOString();
     const signature = await hmacSha256Base64Url(bootstrapSecret, `${ownerKey}\n${expiresAt}`);
-    const initialized = await initializePersonalWorker(serviceUrl, ownerKey, bootstrapSecret, expiresAt, signature, { ...options, reconnect: Boolean(historicalD1) });
+    const initialized = await initializePersonalWorker(serviceUrl, ownerKey, bootstrapSecret, expiresAt, signature, { ...options, reconnect: Boolean(historicalD1), workerName: names.worker });
     step("bootstrap_cleanup");
     await cf(`/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(names.worker)}/secrets/BOOTSTRAP_SECRET`, { method: "DELETE" });
     return initialized;
@@ -1474,6 +1531,17 @@ const DEFAULT_SETTINGS = {
   deploymentStatus: "not_deployed",
   deploymentManaged: false,
   deploymentWorkerUrl: "",
+  deploymentOriginUrl: "",
+  deploymentWorkerName: "",
+  workerVersion: "",
+  workerVersionStatus: "unknown",
+  workerVersionCheckedAt: 0,
+  workerVersionServiceUrl: "",
+  customDomain: "",
+  customDomainId: "",
+  customDomainZoneName: "",
+  customDomainStatus: "none",
+  customDomainTransition: null,
   deploymentLogs: [],
   debugMode: false,
   debugLogs: [],
@@ -1506,7 +1574,46 @@ const COPY = {
   notSelectedMode: "Select this option",
   deploymentStatus: "Deployment status",
   redeployCloudflare: "Retry Cloudflare deployment",
-  deploymentDescription: "Complete setup once on desktop. After syncing this plugin's settings with the Vault, desktop and mobile can publish and update through the saved Worker without another Cloudflare authorization.",
+  updateCloudflareWorker: "Update Cloudflare Worker",
+  workerUpdateRequiredTitle: "Worker update required",
+  workerUpdateRequired: (remote, current) => remote
+    ? `This Worker is running version ${remote}, but this plugin requires ${current}. Click Update Cloudflare Worker before publishing.`
+    : `This Worker does not report a compatible version. Click Update Cloudflare Worker before publishing.`,
+  workerVersionUnavailable: "The Worker version could not be verified. Update the Worker from Obsidian desktop before publishing.",
+  workerUpdateBeforePublishing: (remote, current) => remote
+    ? `Publishing is paused because the Worker is running ${remote}; this plugin requires ${current}. Update the Worker in settings, then publish again.`
+    : "Publishing is paused because the Worker version could not be verified. Update the Worker in settings, then publish again.",
+  deploymentDescription: "Complete setup once on desktop. After syncing this plugin's settings with the Vault, desktop and mobile can publish and update through the saved Worker without another Cloudflare authorization. Use Update Cloudflare Worker after a plugin update to refresh the existing Worker without replacing its data.",
+  customDomain: "Custom domain",
+  customDomainDescription: "Bind a root domain or subdomain already managed by this Cloudflare account. Cloudflare handles the DNS record and certificate. The Cloudflare connection and original Worker address stay unchanged; unbinding only switches publishing back to that Worker.",
+  customDomainPlaceholder: "example.com or notes.example.com",
+  bindCustomDomain: "Bind domain",
+  customDomainBinding: "Binding custom domain...",
+  customDomainBound: (url) => `Custom domain connected: ${url}`,
+  customDomainNotConfigured: "Deploy to your Cloudflare account before binding a custom domain.",
+  customDomainDesktopOnly: "Bind a custom domain from Obsidian desktop. Sync the settings afterward for mobile publishing.",
+  customDomainInvalid: "Enter a valid domain or subdomain without a path.",
+  customDomainConfirm: (domain) => `Bind ${domain} to the One-Click Publish Worker? If this is a root domain, requests for the whole domain may be handled by this Worker. Continue?`,
+  customDomainUnbind: "Unbind",
+  customDomainUnbindConfirm: (domain) => `Unbind ${domain}? Existing published content will remain available on the Worker address.`,
+  customDomainUnbound: "Custom domain unbound. Publishing now uses the Worker address.",
+  customDomainStatus: "Active",
+  customDomainBindingFailed: "Could not bind the custom domain",
+  customDomainUnbindingFailed: "Could not unbind the custom domain",
+  customDomainZoneNotFound: "This domain is not an active Zone in the authorized Cloudflare account.",
+  customDomainNotOwned: "This custom domain is not attached to this One-Click Publish Worker.",
+  customDomainNotFound: "Cloudflare could not find the saved custom domain attachment. The primary Cloudflare connection was kept unchanged.",
+  customDomainLocalSaveFailed: "Cloudflare changed the domain, but the local custom-domain state could not be saved.",
+  customDomainRecoveryRequired: "The custom domain operation changed Cloudflare, but local settings need recovery.",
+  customDomainRecover: "Recover custom-domain state",
+  customDomainRecoveryRestored: "The custom-domain state was restored because Cloudflare still has the domain attached.",
+  customDomainRecoveryCompleted: "The custom domain is no longer attached in Cloudflare. Local settings now use the Worker address.",
+  customDomainRecoveryFailed: "Could not recover the custom-domain state",
+  customDomainOAuthScopeUnavailable: "Custom domain binding is unavailable because this app's Cloudflare OAuth client does not allow the Workers Routes Write scope. The app owner must enable workers-routes.write in the OAuth client before retrying.",
+  customDomainConfirmAction: "Continue",
+  customDomainCancelAction: "Cancel",
+  customDomainActiveAddress: (url) => `Current publishing address: ${url}`,
+  customDomainDiagnostics: "Custom domain authorization diagnostics",
   deploymentStarting: "Starting Cloudflare deployment...",
   deploymentAuthorizing: "Waiting for Cloudflare authorization...",
   deploymentProvisioning: "Checking and preparing your Worker and D1 database...",
@@ -1535,6 +1642,7 @@ const COPY = {
   copyDebugLogs: "Copy debug log",
   noDebugLogs: "No debug log yet. Turn on Debug mode and retry the operation.",
   copyTechnicalDetails: "Copy details",
+  clearTechnicalDetails: "Clear details",
   copied: "Copied to clipboard",
   copyFailed: "Could not copy to clipboard",
   noDeploymentLogs: "No deployment log yet.",
@@ -1571,8 +1679,7 @@ const COPY = {
   fallbackRenderer: "Obsidian rendering was unavailable; published with the fallback renderer.",
   cannotReachService: "Cannot reach the publishing service",
   startLocalServer: "Check that the publishing service is reachable and that the network connection is available, then try again.",
-  quotaExceeded: "Your Cloudflare account has reached the 50 MB published-content quota. Remove an unused site or publish fewer pages and assets.",
-  noteLimitExceeded: "Your Cloudflare account has reached the 10 published Notes limit. Remove an unused site before publishing another.",
+  requestTooLarge: "The publishing request is too large for the Worker. Publishing is chunked; reduce the size of one request and try again.",
   authenticationRequired: "Complete Cloudflare setup on Obsidian desktop, then sync this plugin's settings with the Vault before publishing.",
   workerUnavailable: "The Cloudflare Worker is unavailable. Check its URL and deployment status.",
   uploading: (current, total) => `Uploading ${current}/${total} chunks...`,
@@ -1598,7 +1705,38 @@ const COPY_ZH = {
   notSelectedMode: "选择此方式",
   deploymentStatus: "部署状态",
   redeployCloudflare: "重试 Cloudflare 部署",
-  deploymentDescription: "请先在桌面版完成一次部署。将本插件的设置随 Vault 同步后，电脑和手机都可以通过已保存的 Worker 发布和更新，无需再次授权 Cloudflare。",
+  updateCloudflareWorker: "更新 Cloudflare Worker",
+  deploymentDescription: "请先在桌面版完成一次部署。将本插件的设置随 Vault 同步后，电脑和手机都可以通过已保存的 Worker 发布和更新，无需再次授权 Cloudflare。插件更新后可点击“更新 Cloudflare Worker”，在不替换数据的情况下刷新现有 Worker。",
+  customDomain: "自定义域名",
+  customDomainDescription: "绑定当前 Cloudflare 账户管理的根域名或子域名。Cloudflare 会处理 DNS 记录和证书。Cloudflare 主连接和原始 Worker 地址保持不变；解绑只会切回 Worker 发布地址。",
+  customDomainPlaceholder: "example.com 或 notes.example.com",
+  bindCustomDomain: "绑定域名",
+  customDomainBinding: "正在绑定自定义域名……",
+  customDomainBound: (url) => `自定义域名已连接：${url}`,
+  customDomainNotConfigured: "请先部署到你的 Cloudflare 账户，再绑定自定义域名。",
+  customDomainDesktopOnly: "请在 Obsidian 桌面版绑定自定义域名；完成后同步设置即可在移动端发布。",
+  customDomainInvalid: "请输入有效的域名或子域名，且不要包含路径。",
+  customDomainConfirm: (domain) => `确定将 ${domain} 绑定到 One-Click Publish Worker 吗？如果这是根域名，整个域名的请求可能会由此 Worker 处理。是否继续？`,
+  customDomainUnbind: "解绑",
+  customDomainUnbindConfirm: (domain) => `确定解绑 ${domain} 吗？已有发布内容仍可通过 Worker 地址访问。`,
+  customDomainUnbound: "自定义域名已解绑，发布将改用 Worker 地址。",
+  customDomainStatus: "已生效",
+  customDomainBindingFailed: "无法绑定自定义域名",
+  customDomainUnbindingFailed: "无法解绑自定义域名",
+  customDomainZoneNotFound: "此域名不在当前已授权的 Cloudflare 账户中，或该 Zone 尚未激活。",
+  customDomainNotOwned: "此自定义域名并未绑定到当前 One-Click Publish Worker。",
+  customDomainNotFound: "Cloudflare 中找不到已保存的自定义域名绑定记录。主 Cloudflare 连接未改变。",
+  customDomainLocalSaveFailed: "Cloudflare 已经处理了域名，但本地自定义域名状态保存失败。",
+  customDomainRecoveryRequired: "Cloudflare 中的自定义域名操作已发生变化，但本地设置需要恢复。",
+  customDomainRecover: "恢复自定义域名状态",
+  customDomainRecoveryRestored: "Cloudflare 中的域名仍然存在，已恢复本地自定义域名状态。",
+  customDomainRecoveryCompleted: "Cloudflare 中已没有该自定义域名绑定，本地设置已切回 Worker 地址。",
+  customDomainRecoveryFailed: "无法恢复自定义域名状态",
+  customDomainOAuthScopeUnavailable: "当前应用的 Cloudflare OAuth Client 尚未允许 Workers Routes Write 权限。请由应用维护者在 OAuth Client 中启用 workers-routes.write 后再重试。",
+  customDomainConfirmAction: "继续",
+  customDomainCancelAction: "取消",
+  customDomainActiveAddress: (url) => `当前发布地址：${url}`,
+  customDomainDiagnostics: "自定义域名授权诊断",
   deploymentStarting: "正在启动 Cloudflare 部署……",
   deploymentAuthorizing: "等待 Cloudflare 授权……",
   deploymentProvisioning: "正在检查并准备 Worker 和 D1 数据库……",
@@ -1627,6 +1765,7 @@ const COPY_ZH = {
   copyDebugLogs: "复制调试日志",
   noDebugLogs: "还没有调试日志。请开启调试模式后重试操作。",
   copyTechnicalDetails: "复制详情",
+  clearTechnicalDetails: "清除详情",
   copied: "已复制到剪贴板",
   copyFailed: "无法复制到剪贴板",
   noDeploymentLogs: "还没有部署日志。",
@@ -1637,6 +1776,14 @@ const COPY_ZH = {
   deploymentStageErrors: { accounts: "插件无法读取已授权的 Cloudflare 账户。", resources: "插件无法检查 Cloudflare 资源或识别历史 One-Click Publish 数据库。", database: "插件无法创建或识别 D1 数据库。", subdomain: "插件无法配置 Worker 地址。", worker_upload: "插件在上传 Worker 时无法连接 D1 数据库。请确认 D1 数据库已创建且绑定信息有效。", worker_enable: "插件无法启用 Worker 地址。", migration: "插件无法执行 D1 数据库迁移。", ready_check: "插件无法确认 Worker 已就绪。", initialize: "插件无法创建或恢复 One-Click Publish 账户。", bootstrap_cleanup: "插件无法删除临时初始化凭证。", authorization: "插件无法完成 Cloudflare 授权。" },
   notDeployed: "尚未部署",
   workerAddress: (url) => `Worker 地址：${url}`,
+  workerUpdateRequiredTitle: "需要更新 Worker",
+  workerUpdateRequired: (remote, current) => remote
+    ? `当前 Worker 运行的是 ${remote}，但本插件需要 ${current}。请点击“更新 Cloudflare Worker”后再发布。`
+    : "当前 Worker 没有报告兼容版本。请点击“更新 Cloudflare Worker”后再发布。",
+  workerVersionUnavailable: "无法确认 Worker 版本。请在 Obsidian 桌面版更新 Worker 后再发布。",
+  workerUpdateBeforePublishing: (remote, current) => remote
+    ? `发布已暂停：当前 Worker 是 ${remote}，本插件需要 ${current}。请先在设置中更新 Worker，再重新发布。`
+    : "发布已暂停：无法确认 Worker 版本。请先在设置中更新 Worker，再重新发布。",
   deployedNotice: (url) => `Cloudflare Worker 已连接：${url}`,
   deployCancelled: "Cloudflare 部署已取消或已过期。",
   connected: "已连接",
@@ -1663,8 +1810,7 @@ const COPY_ZH = {
   fallbackRenderer: "Obsidian 原生渲染不可用，已使用备用渲染器发布。",
   cannotReachService: "无法连接发布服务",
   startLocalServer: "请确认发布服务可访问且网络连接可用，然后重试。",
-  quotaExceeded: "你的 Cloudflare 账户已达到 50 MB 发布内容配额。请删除不用的站点或减少页面和资源后重试。",
-  noteLimitExceeded: "你的 Cloudflare 账户已达到最多发布 10 篇 Note 的限制。请先删除不用的站点。",
+  requestTooLarge: "发布请求超过 Worker 单次请求大小限制。发布会自动分片，请减少单个请求大小后重试。",
   authenticationRequired: "请先在 Obsidian 桌面版完成 Cloudflare 部署，再将本插件的设置随 Vault 同步后发布。",
   workerUnavailable: "Cloudflare Worker 当前不可用，请检查地址和部署状态。",
   uploading: (current, total) => `正在上传第 ${current}/${total} 个分片...`,
@@ -1680,6 +1826,15 @@ function normalizeCloudflareMode(value) {
   return value === "self" ? "self" : "official";
 }
 
+function normalizeWorkerVersionStatus(value) {
+  return ["current", "outdated", "unreachable"].includes(value) ? value : "unknown";
+}
+
+function workerVersionNeedsUpdate(settings) {
+  if (!settings?.deploymentWorkerUrl || !settings?.selfPublishToken) return false;
+  return settings.workerVersionStatus !== "current" || String(settings.workerVersion || "") !== EMBEDDED_TARGET_PLUGIN_VERSION;
+}
+
 function isPlaceholderEndpoint(value) {
   return value === OFFICIAL_SERVICE_URL;
 }
@@ -1690,11 +1845,92 @@ function validConnection(value) {
   return { serviceUrl: value.serviceUrl.trim().replace(/\/$/, ""), publishToken: value.publishToken.trim() };
 }
 
+function normalizeCustomDomain(value) {
+  let input = String(value || "").trim().toLowerCase();
+  if (!input) return "";
+  if (!/^[a-z][a-z\d+.-]*:\/\//i.test(input)) input = `https://${input}`;
+  try {
+    const url = new URL(input);
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) return "";
+    input = url.hostname.replace(/\.$/, "");
+  } catch {
+    return "";
+  }
+  if (input.length > 253 || !input.includes(".") || input.includes("..")) return "";
+  const labels = input.split(".");
+  if (labels.some((label) => !label || label.length > 63 || !/^[a-z\d](?:[a-z\d-]*[a-z\d])?$/i.test(label))) return "";
+  return input;
+}
+
+function normalizeCustomDomainTransition(value) {
+  if (!value || typeof value !== "object" || value.state !== "detaching") return null;
+  const hostname = normalizeCustomDomain(value.hostname);
+  if (!hostname) return null;
+  return {
+    state: "detaching",
+    operationId: normalizeOperationId(value.operationId),
+    hostname,
+    domainId: sanitizeProviderCode(value.domainId).slice(0, 160),
+    originUrl: String(value.originUrl || "").trim().replace(/\/$/, ""),
+    workerName: sanitizeProviderCode(value.workerName),
+    startedAt: String(value.startedAt || "").slice(0, 40),
+  };
+}
+
+function customDomainUrl(hostname) {
+  return `https://${normalizeCustomDomain(hostname)}`;
+}
+
+function rewriteUrlOrigin(value, fromOrigin, toOrigin) {
+  const current = String(value || "").trim();
+  const from = String(fromOrigin || "").replace(/\/$/, "");
+  const to = String(toOrigin || "").replace(/\/$/, "");
+  if (!current || !from || !to) return current;
+  try {
+    const url = new URL(current);
+    if (url.origin !== from) return current;
+    return `${to}${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return current;
+  }
+}
+
+function canonicalWorkerUrl(settings) {
+  return String(settings?.deploymentOriginUrl || settings?.deploymentWorkerUrl || "").trim().replace(/\/$/, "");
+}
+
+function selfConnectionUrl(settings) {
+  const active = String(settings?.apiBaseUrl || "").trim().replace(/\/$/, "");
+  const worker = canonicalWorkerUrl(settings);
+  const custom = normalizeCustomDomain(settings?.customDomain);
+  if (settings?.cloudflareMode === "self" && active && (active === worker || custom && active === customDomainUrl(custom))) return active;
+  return worker;
+}
+
+function findCloudflareZoneForHostname(hostname, zones) {
+  const normalized = normalizeCustomDomain(hostname);
+  return (Array.isArray(zones) ? zones : [])
+    .map((zone) => ({ ...zone, name: normalizeCustomDomain(zone?.name) }))
+    .filter((zone) => zone.name && (normalized === zone.name || normalized.endsWith(`.${zone.name}`)))
+    .sort((left, right) => right.name.length - left.name.length)[0];
+}
+
+function workerNameFromServiceUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    if (!url.hostname.endsWith(".workers.dev")) return "";
+    const name = url.hostname.split(".")[0];
+    return /^[a-z\d][a-z\d-]{0,62}$/i.test(name) ? name : "";
+  } catch {
+    return "";
+  }
+}
+
 function packConnections(settings) {
   // A single JSON string is a sync unit: URL/token pairs cannot be merged field
   // by field by a settings sync service. Legacy fields remain readable.
   return JSON.stringify({
-    self: validConnection({ serviceUrl: settings.deploymentWorkerUrl, publishToken: settings.selfPublishToken }),
+    self: validConnection({ serviceUrl: selfConnectionUrl(settings), publishToken: settings.selfPublishToken }),
     official: validConnection({ serviceUrl: settings.officialServiceUrl || OFFICIAL_SERVICE_URL, publishToken: settings.officialPublishToken }),
   });
 }
@@ -1711,11 +1947,27 @@ function normalizeSettings(stored) {
     catch { self = null; official = null; }
   }
   const current = mode === "self" ? self : official;
+  const originUrl = String(stored.deploymentOriginUrl || (stored.deploymentWorkerUrl && String(stored.deploymentWorkerUrl).replace(/\/$/, "").endsWith(".workers.dev") ? stored.deploymentWorkerUrl : self?.serviceUrl?.endsWith(".workers.dev") ? self.serviceUrl : "")).replace(/\/$/, "");
+  const savedWorkerVersion = String(stored.workerVersion || "").trim();
+  const savedWorkerVersionStatus = savedWorkerVersion && savedWorkerVersion !== EMBEDDED_TARGET_PLUGIN_VERSION
+    ? "outdated"
+    : normalizeWorkerVersionStatus(stored.workerVersionStatus);
   const settings = { ...DEFAULT_SETTINGS, ...stored,
     cloudflareMode: mode,
     apiBaseUrl: current?.serviceUrl || (mode === "self" ? "" : stored.officialServiceUrl || legacyUrl),
     publishToken: current?.publishToken || "",
-    selfPublishToken: self?.publishToken || "", deploymentWorkerUrl: self?.serviceUrl || "",
+    selfPublishToken: self?.publishToken || "", deploymentWorkerUrl: originUrl || self?.serviceUrl || "",
+    deploymentOriginUrl: originUrl,
+    deploymentWorkerName: String(stored.deploymentWorkerName || workerNameFromServiceUrl(stored.deploymentOriginUrl || self?.serviceUrl) || ""),
+    workerVersion: savedWorkerVersion,
+    workerVersionStatus: savedWorkerVersionStatus,
+    workerVersionCheckedAt: Number.isFinite(Number(stored.workerVersionCheckedAt)) ? Number(stored.workerVersionCheckedAt) : 0,
+    workerVersionServiceUrl: String(stored.workerVersionServiceUrl || "").trim().replace(/\/$/, ""),
+    customDomain: normalizeCustomDomain(stored.customDomain),
+    customDomainId: String(stored.customDomainId || ""),
+    customDomainZoneName: normalizeCustomDomain(stored.customDomainZoneName),
+    customDomainStatus: stored.customDomain && normalizeCustomDomain(stored.customDomain) ? String(stored.customDomainStatus || "active") : "none",
+    customDomainTransition: normalizeCustomDomainTransition(stored.customDomainTransition),
     officialPublishToken: official?.publishToken || "", officialServiceUrl: official?.serviceUrl || stored.officialServiceUrl || OFFICIAL_SERVICE_URL,
     connectionStatus: current ? "connected" : "disconnected", deploymentStatus: self ? "ready" : "not_deployed",
     deploymentLogs: normalizeDeploymentLogs(stored.deploymentLogs),
@@ -1749,6 +2001,7 @@ class SharePublisherPlugin extends Plugin {
     }));
     this.settingTab = new SharePublisherSettingTab(this.app, this);
     this.addSettingTab(this.settingTab);
+    void this.refreshWorkerVersion();
     if (typeof document !== "undefined") this.registerDomEvent(document, "visibilitychange", () => {
       if (document.visibilityState === "visible") void this.refreshSettings();
     });
@@ -1770,7 +2023,7 @@ class SharePublisherPlugin extends Plugin {
   }
 
   async refreshSettings() {
-    try { await this.loadSettings(); this.refreshSettingTab(); } catch { /* keep the last complete in-memory connection */ }
+    try { await this.loadSettings(); await this.refreshWorkerVersion(); this.refreshSettingTab(); } catch { /* keep the last complete in-memory connection */ }
   }
 
   async onExternalSettingsChange() { await this.refreshSettings(); }
@@ -1779,14 +2032,57 @@ class SharePublisherPlugin extends Plugin {
     if (this.settingTab?.containerEl?.isShown?.()) this.settingTab.display();
   }
 
+  async refreshWorkerVersion(options = {}) {
+    const settings = this.settings || {};
+    const hasPersonalConnection = Boolean(settings.cloudflareMode === "self" && settings.deploymentWorkerUrl && settings.selfPublishToken);
+    if (!hasPersonalConnection) return { status: "not_applicable", version: "" };
+    const storedVersion = String(settings.workerVersion || "").trim();
+    const checkedAt = Number(settings.workerVersionCheckedAt || 0);
+    const now = Date.now();
+    const serviceUrl = String(canonicalWorkerUrl(settings) || options.connection?.serviceUrl || settings.apiBaseUrl || selfConnectionUrl(settings)).replace(/\/$/, "");
+    if (!options.force && storedVersion && storedVersion !== EMBEDDED_TARGET_PLUGIN_VERSION) {
+      return { status: "outdated", version: storedVersion };
+    }
+    if (!options.force && settings.workerVersionStatus === "current" && storedVersion === EMBEDDED_TARGET_PLUGIN_VERSION && settings.workerVersionServiceUrl === serviceUrl && now - checkedAt < 5 * 60 * 1000) {
+      return { status: "current", version: storedVersion };
+    }
+    if (this.workerVersionCheckPromise) return this.workerVersionCheckPromise;
+    if (!serviceUrl) return { status: "unreachable", version: "" };
+    const connection = { serviceUrl, publishToken: "" };
+    const pending = (async () => {
+      try {
+        const health = await this.requestPublish(`${serviceUrl}/healthz`, "GET", undefined, {
+          authenticated: false,
+          connection,
+          stage: "worker_version",
+        });
+        const version = String(health?.version || "").trim();
+        const status = version === EMBEDDED_TARGET_PLUGIN_VERSION ? "current" : "outdated";
+        await this.saveSettings({ workerVersion: version, workerVersionStatus: status, workerVersionCheckedAt: Date.now(), workerVersionServiceUrl: serviceUrl });
+        return { status, version };
+      } catch (error) {
+        await this.saveSettings({ workerVersion: "", workerVersionStatus: "unreachable", workerVersionCheckedAt: Date.now(), workerVersionServiceUrl: serviceUrl });
+        return { status: "unreachable", version: "", error };
+      }
+    })();
+    this.workerVersionCheckPromise = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.workerVersionCheckPromise === pending) this.workerVersionCheckPromise = null;
+      this.refreshSettingTab();
+    }
+  }
+
   recordDeploymentLog(entry) {
-    if (!this.deploymentSession) return;
-    const record = deploymentLogRecord(entry);
-    this.deploymentSession.logs = [...(this.deploymentSession.logs || []), record].slice(-60);
+    const session = [this.deploymentSession, this.domainBindingSession].find((item) => item?.active) || this.domainBindingSession || this.deploymentSession;
+    if (!session) return;
+    const record = deploymentLogRecord({ ...entry, operationId: entry.operationId || session.operationId });
+    session.logs = [...(session.logs || []), record].slice(-60);
     this.refreshSettingTab();
   }
 
-  async persistDeploymentLogs(session = this.deploymentSession) {
+  async persistDeploymentLogs(session = this.deploymentSession || this.domainBindingSession) {
     if (!session?.logs?.length) return;
     try {
       await this.saveSettings({ deploymentLogs: [...(this.settings.deploymentLogs || []), ...session.logs].slice(-60) });
@@ -1796,13 +2092,38 @@ class SharePublisherPlugin extends Plugin {
   }
 
   async clearDeploymentLogs() {
+    if ([this.deploymentSession, this.domainBindingSession].some((session) => session?.active)) return false;
+    for (const session of [this.deploymentSession, this.domainBindingSession]) {
+      if (session) session.logs = [];
+    }
     await this.saveSettings({ deploymentLogs: [] });
     this.refreshSettingTab();
+    return true;
+  }
+
+  async clearOperationDiagnostics(session) {
+    if (!session || session.active) return false;
+    const operationId = String(session.operationId || "");
+    const retainedLogs = operationId
+      ? (this.settings.deploymentLogs || []).filter((entry) => String(entry?.operationId || "") !== operationId)
+      : (this.settings.deploymentLogs || []).filter((entry) => String(entry?.operationId || ""));
+    session.logs = [];
+    session.error = null;
+    session.cleanupError = null;
+    await this.saveSettings({ deploymentLogs: retainedLogs });
+    if (this.deploymentSession === session) this.deploymentSession = null;
+    if (this.domainBindingSession === session) this.domainBindingSession = null;
+    this.refreshSettingTab();
+    return true;
   }
 
   recordDebugLog(entry) {
     if (!this.settings?.debugMode) return;
-    const record = debugLogRecord(entry);
+    const activeSession = [this.deploymentSession, this.domainBindingSession].find((session) => session?.active);
+    const record = debugLogRecord({
+      ...entry,
+      operationId: entry.operationId || activeSession?.operationId || this.publishOperationId,
+    });
     if (!record.stage && !record.route && !record.message && !record.code && !record.providerMessage) return;
     this.debugLogsBuffer = [...(this.debugLogsBuffer || this.settings.debugLogs || []), record].slice(-120);
     this.settings.debugLogs = this.debugLogsBuffer;
@@ -1821,7 +2142,11 @@ class SharePublisherPlugin extends Plugin {
 
   async clearDebugLogs() {
     this.debugLogsBuffer = [];
-    await this.saveSettings({ debugLogs: [] });
+    this.settings.debugLogs = [];
+    this.debugLogsWritePromise = (this.debugLogsWritePromise || Promise.resolve())
+      .catch(() => undefined)
+      .then(() => this.saveSettings({ debugLogs: [] }));
+    await this.debugLogsWritePromise;
     this.refreshSettingTab();
   }
 
@@ -1838,7 +2163,7 @@ class SharePublisherPlugin extends Plugin {
     return this.enqueueSettings(async () => {
       const latest = normalizeSettings(await this.loadData());
       let next = { ...latest, ...delta };
-      if (["selfPublishToken", "deploymentWorkerUrl", "officialPublishToken", "officialServiceUrl"].some((key) => key in delta)) next.connectionProfiles = packConnections(next);
+      if (["cloudflareMode", "apiBaseUrl", "serviceUrl", "selfPublishToken", "deploymentWorkerUrl", "deploymentOriginUrl", "customDomain", "officialPublishToken", "officialServiceUrl"].some((key) => key in delta)) next.connectionProfiles = packConnections(next);
       next = normalizeSettings(next);
       await this.saveData(next);
       this.settings = next;
@@ -1852,8 +2177,12 @@ class SharePublisherPlugin extends Plugin {
   }
 
   async disconnectCloudflare() {
-    if (this.deploymentSession?.active || this.provisioningPromise) {
+    if (this.deploymentSession?.active || this.provisioningPromise || this.domainBindingPromise || this.domainBindingSession?.active) {
       new Notice(this.copy().deploymentStarting);
+      return false;
+    }
+    if (this.settings?.customDomainTransition) {
+      new Notice(this.copy().customDomainRecoveryRequired);
       return false;
     }
     await this.saveSettings({
@@ -1864,6 +2193,17 @@ class SharePublisherPlugin extends Plugin {
       accessToken: "",
       selfPublishToken: "",
       deploymentWorkerUrl: "",
+      deploymentOriginUrl: "",
+      deploymentWorkerName: "",
+      workerVersion: "",
+      workerVersionStatus: "unknown",
+      workerVersionCheckedAt: 0,
+      workerVersionServiceUrl: "",
+      customDomain: "",
+      customDomainId: "",
+      customDomainZoneName: "",
+      customDomainStatus: "none",
+      customDomainTransition: null,
       connectionStatus: "disconnected",
       deploymentStatus: "not_deployed",
       deploymentManaged: false,
@@ -1882,12 +2222,24 @@ class SharePublisherPlugin extends Plugin {
   }
 
   async publishFile(file) {
+    const operationId = createOperationId("publish");
+    this.publishOperationId = operationId;
     let phase = "prepare";
-    this.recordDebugLog({ type: "phase", stage: "publish.prepare", message: "Publish started" });
+    this.recordDebugLog({ operationId, type: "phase", stage: "publish.prepare", message: "Publish started" });
     try {
       phase = "load_settings";
       await this.loadSettings();
       const connection = this.connectionSnapshot();
+      phase = "worker_version";
+      const workerVersion = await this.refreshWorkerVersion({ force: true, connection });
+      if (this.settings.cloudflareMode === "self" && workerVersion.status !== "current") {
+        const copy = this.copy();
+        const message = workerVersion.status === "outdated"
+          ? copy.workerUpdateBeforePublishing(workerVersion.version, EMBEDDED_TARGET_PLUGIN_VERSION)
+          : copy.workerVersionUnavailable;
+        new Notice(message, 12_000);
+        return;
+      }
       phase = "read_note";
       const markdown = await this.app.vault.read(file);
       phase = "collect_notes";
@@ -1909,23 +2261,23 @@ class SharePublisherPlugin extends Plugin {
       phase = "save_metadata";
       await this.savePublishedMetadata(file, result, publishedUrl);
       await this.finishPublish(result, publishedUrl);
-      this.recordDebugLog({ type: "phase", stage: "publish.complete", message: "Publish completed", route: "/v1/uploads/:upload/commit" });
+      this.recordDebugLog({ operationId, type: "phase", stage: "publish.complete", message: "Publish completed", route: "/v1/uploads/:upload/commit" });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const code = String(error?.code || message.split(":", 1)[0] || "");
       const providerMessage = sanitizeExternalMessage(error?.providerMessage);
       const friendly = code === "QUOTA_EXCEEDED"
-        ? this.copy().quotaExceeded
-        : code === "LIMIT_EXCEEDED"
-          ? this.copy().noteLimitExceeded
-          : code === "UNAUTHORIZED"
+        ? this.copy().requestTooLarge
+        : code === "UNAUTHORIZED"
             ? this.copy().authenticationRequired
             : code === "INTERNAL_ERROR" || code === "WORKER_UNAVAILABLE"
               ? `${this.copy().workerUnavailable}${providerMessage ? ` ${providerMessage}` : ""}`
               : message;
-      this.recordDebugLog({ type: "publish_error", stage: `publish.${phase}`, error, message: `${phase}: ${message}` });
+      this.recordDebugLog({ operationId, type: "publish_error", stage: `publish.${phase}`, error, message: `${phase}: ${message}` });
       await this.persistDebugLogs();
       new Notice(`${this.copy().publishFailed}: ${friendly}`);
+    } finally {
+      if (this.publishOperationId === operationId) this.publishOperationId = "";
     }
   }
 
@@ -1947,7 +2299,7 @@ class SharePublisherPlugin extends Plugin {
     const route = serviceRoute(endpoint);
     const stage = options.stage || (route.startsWith("/v1/auth/") ? "authorization" : "publish");
     const startedAt = Date.now();
-    const serializedPayload = JSON.stringify(payload);
+    const serializedPayload = payload === undefined ? "" : JSON.stringify(payload);
     const connection = options.connection || this.connectionSnapshot();
     const hasAuthorization = options.authenticated !== false && Boolean(connection.publishToken);
     const transport = { transport: "obsidian.requestUrl", endpointOrigin: safeEndpointOrigin(endpoint), requestBodyBytes: utf8ByteLength(serializedPayload), hasAuthorization };
@@ -1955,13 +2307,14 @@ class SharePublisherPlugin extends Plugin {
     try {
       const headers = { "content-type": "application/json" };
       if (hasAuthorization) headers.authorization = `Bearer ${connection.publishToken}`;
-      response = await requestUrl({
+      const requestOptions = {
         url: endpoint,
         method,
         headers,
-        body: serializedPayload,
         throw: false,
-      });
+      };
+      if (!/^(GET|HEAD)$/i.test(method) && serializedPayload) requestOptions.body = serializedPayload;
+      response = await requestUrl(requestOptions);
     } catch (error) {
       const status = error?.status ?? error?.statusCode ?? error?.response?.status;
       const detail = requestErrorDetail(error);
@@ -2067,7 +2420,8 @@ class SharePublisherPlugin extends Plugin {
   async runDirectCloudflareDeployment() {
     const copy = this.copy();
     await this.loadSettings();
-    if (this.settings.selfPublishToken && this.settings.deploymentWorkerUrl) {
+    const hasPersonalConnection = Boolean(this.settings.selfPublishToken && this.settings.deploymentWorkerUrl);
+    if (hasPersonalConnection && this.settings.cloudflareMode !== "self") {
       await this.selectCloudflareMode("self");
       return true;
     }
@@ -2079,7 +2433,7 @@ class SharePublisherPlugin extends Plugin {
       new Notice(`${copy.deploymentFailed}: ${copy.cloudflareOAuthNotConfigured}`);
       return false;
     }
-    const session = { stage: "authorization", active: true, error: null, logs: [] };
+    const session = { operationId: createOperationId("deployment"), stage: "authorization", active: true, error: null, logs: [] };
     this.deploymentSession = session;
     const progress = new Notice(copy.deploymentAuthorizing, 0);
     const onStage = (stage) => {
@@ -2114,7 +2468,17 @@ class SharePublisherPlugin extends Plugin {
       const result = await provisionPersonalCloudflare(accessToken, onStage, { debugLog });
       onStage("save");
       try {
-        await this.saveSettings({ cloudflareMode: "self", selfPublishToken: result.publishToken, deploymentWorkerUrl: result.serviceUrl });
+        await this.saveSettings({
+          cloudflareMode: "self",
+          selfPublishToken: result.publishToken,
+          deploymentWorkerUrl: result.serviceUrl,
+          deploymentOriginUrl: result.serviceUrl,
+          deploymentWorkerName: result.workerName || workerNameFromServiceUrl(result.serviceUrl),
+          workerVersion: EMBEDDED_TARGET_PLUGIN_VERSION,
+          workerVersionStatus: "current",
+          workerVersionCheckedAt: Date.now(),
+          workerVersionServiceUrl: result.serviceUrl,
+        });
       } catch {
         const error = new CloudflareProvisioningError("SETTINGS_SAVE_FAILED", "Could not save the connection", { stage: "save" });
         error.cleanupIncomplete = true;
@@ -2124,6 +2488,7 @@ class SharePublisherPlugin extends Plugin {
       return true;
     } catch (cause) {
       const error = cause instanceof CloudflareProvisioningError ? cause : new CloudflareProvisioningError("PROVISIONING_FAILED", "Deployment failed", { stage: session.stage });
+      error.operationId = session.operationId;
       session.error = error;
       this.recordDeploymentLog({ error });
       new Notice(deploymentFailure(error, copy), 12_000);
@@ -2142,6 +2507,354 @@ class SharePublisherPlugin extends Plugin {
           this.recordDeploymentLog({ error: session.cleanupError });
           new Notice(copy.oauthCleanupWarning);
         }
+      }
+      accessToken = "";
+      await this.persistDeploymentLogs(session);
+      await this.persistDebugLogs();
+      session.active = false;
+      this.refreshSettingTab();
+    }
+  }
+
+  async bindCustomDomain(value) {
+    if (this.domainBindingPromise) return this.domainBindingPromise;
+    const hostname = normalizeCustomDomain(value);
+    const copy = this.copy();
+    if (!hostname) {
+      new Notice(copy.customDomainInvalid);
+      return false;
+    }
+    if (!this.settings?.selfPublishToken || !this.settings?.deploymentWorkerUrl) {
+      new Notice(copy.customDomainNotConfigured);
+      return false;
+    }
+    if (!isDesktopEnvironment()) {
+      new Notice(copy.customDomainDesktopOnly);
+      return false;
+    }
+    this.domainBindingPromise = this.runCustomDomainBinding(hostname);
+    try { return await this.domainBindingPromise; } finally { this.domainBindingPromise = null; }
+  }
+
+  async runCustomDomainBinding(hostname) {
+    const copy = this.copy();
+    const session = { operationId: createOperationId("domain-bind"), stage: "authorization", active: true, error: null, logs: [] };
+    this.domainBindingSession = session;
+    const progress = new Notice(copy.customDomainBinding, 0);
+    const onStage = (stage) => {
+      session.stage = stage;
+      this.recordDeploymentLog({ type: "stage", stage, message: stage });
+      progress.setMessage?.(copy.customDomainBinding);
+      this.refreshSettingTab();
+    };
+    const debugLog = (entry) => this.recordDebugLog(entry);
+    this.recordDebugLog({ type: "phase", stage: "custom_domain.authorization", message: "Custom domain binding started" });
+    let callback;
+    let accessToken = "";
+    try {
+      await this.loadSettings();
+      const deploymentWorkerUrl = String(this.settings.deploymentWorkerUrl || "");
+      const originUrl = String(this.settings.deploymentOriginUrl || (deploymentWorkerUrl.endsWith(".workers.dev") ? deploymentWorkerUrl : "")).replace(/\/$/, "");
+      const workerName = this.settings.deploymentWorkerName || workerNameFromServiceUrl(originUrl);
+      if (!originUrl || !workerName) throw new CloudflareProvisioningError("CUSTOM_DOMAIN_ORIGIN_MISSING", "The original Worker address is unavailable", { stage: "resources" });
+      onStage("authorization");
+      const authorized = await authorizeCloudflareScope(CLOUDFLARE_DOMAIN_OAUTH_SCOPE, { debugLog });
+      callback = authorized.callback;
+      accessToken = authorized.accessToken;
+      const cf = (path, init = {}, options = {}) => cloudflareApiRequest(path, accessToken, init, { stage: session.stage, debugLog, ...options });
+      onStage("accounts");
+      const accounts = await cf("/accounts?per_page=50");
+      if (!Array.isArray(accounts) || accounts.length === 0) throw new CloudflareProvisioningError("NO_ACCOUNT_ACCESS", "No Cloudflare account is available for this authorization", { stage: session.stage });
+      if (accounts.length > 1) throw new CloudflareProvisioningError("MULTIPLE_ACCOUNTS", "Authorize exactly one Cloudflare account for custom domain binding", { stage: session.stage });
+      const accountId = String(accounts[0]?.id || "");
+      if (!accountId) throw new CloudflareProvisioningError("NO_ACCOUNT_ACCESS", "Cloudflare did not return an account for this authorization", { stage: session.stage });
+      onStage("resources");
+      const domains = await cf(`/accounts/${encodeURIComponent(accountId)}/workers/domains`);
+      const currentDomains = Array.isArray(domains) ? domains : [];
+      const workerDomains = currentDomains.filter((domain) => String(domain?.service || "") === workerName);
+      const existing = workerDomains.find((domain) => normalizeCustomDomain(domain?.hostname) === hostname);
+      const other = workerDomains.find((domain) => normalizeCustomDomain(domain?.hostname) && normalizeCustomDomain(domain?.hostname) !== hostname);
+      if (other) throw new CloudflareProvisioningError("CUSTOM_DOMAIN_ALREADY_BOUND", `This Worker already has a custom domain: ${normalizeCustomDomain(other.hostname)}`, { stage: session.stage });
+      const zone = await findCloudflareZone(accessToken, accountId, hostname, { stage: session.stage, debugLog });
+      if (!zone?.id || !zone?.name) throw new CloudflareProvisioningError("CUSTOM_DOMAIN_ZONE_NOT_FOUND", "The domain is not an active Zone in this Cloudflare account", { stage: session.stage });
+      if (zone.status && zone.status !== "active") throw new CloudflareProvisioningError("CUSTOM_DOMAIN_ZONE_INACTIVE", "The Cloudflare Zone is not active", { stage: session.stage });
+      onStage("domain_attach");
+      const attached = existing || await cf(`/accounts/${encodeURIComponent(accountId)}/workers/domains`, {
+        method: "PUT",
+        body: JSON.stringify({ hostname, service: workerName, zone_id: String(zone.id), zone_name: String(zone.name) }),
+      });
+      const domainId = String(attached?.id || existing?.id || "");
+      if (!domainId) throw new CloudflareProvisioningError("CUSTOM_DOMAIN_INVALID_RESPONSE", "Cloudflare did not return a custom domain id", { stage: session.stage });
+      const activeUrl = customDomainUrl(hostname);
+      await this.saveSettings({
+        cloudflareMode: "self",
+        apiBaseUrl: activeUrl,
+        serviceUrl: activeUrl,
+        deploymentWorkerUrl: originUrl,
+        deploymentOriginUrl: originUrl,
+        deploymentWorkerName: workerName,
+        customDomain: hostname,
+        customDomainId: domainId,
+        customDomainZoneName: String(zone.name),
+        customDomainStatus: "active",
+        connectionStatus: "connected",
+        deploymentStatus: "ready",
+        lastPublishedUrl: rewriteUrlOrigin(this.settings.lastPublishedUrl, originUrl, activeUrl),
+      });
+      new Notice(copy.customDomainBound(activeUrl));
+      return true;
+    } catch (cause) {
+      const error = cause instanceof CloudflareProvisioningError ? cause : new CloudflareProvisioningError("CUSTOM_DOMAIN_BINDING_FAILED", "Custom domain binding failed", { stage: session.stage });
+      error.operationId = session.operationId;
+      session.error = error;
+      this.recordDeploymentLog({ error });
+      new Notice(`${copy.customDomainBindingFailed}: ${customDomainFailureMessage(error, copy)}`, 12_000);
+      return false;
+    } finally {
+      progress.hide?.();
+      callback?.close();
+      if (callback) await callback.closed;
+      if (accessToken) {
+        try { await revokeCloudflareToken(accessToken, { debugLog }); }
+        catch (error) { session.cleanupError = error; this.recordDeploymentLog({ error }); new Notice(copy.oauthCleanupWarning); }
+      }
+      accessToken = "";
+      await this.persistDeploymentLogs(session);
+      await this.persistDebugLogs();
+      session.active = false;
+      this.refreshSettingTab();
+    }
+  }
+
+  async unbindCustomDomain() {
+    if (this.domainBindingPromise) return false;
+    const copy = this.copy();
+    const hostname = normalizeCustomDomain(this.settings?.customDomain);
+    if (!hostname) return true;
+    if (!isDesktopEnvironment()) {
+      new Notice(copy.customDomainDesktopOnly);
+      return false;
+    }
+    this.domainBindingPromise = this.runCustomDomainUnbinding(hostname);
+    try { return await this.domainBindingPromise; } finally { this.domainBindingPromise = null; }
+  }
+
+  async runCustomDomainUnbinding(hostname) {
+    const copy = this.copy();
+    const session = { operationId: createOperationId("domain-unbind"), remoteOutcome: "not_started", stage: "authorization", active: true, error: null, logs: [] };
+    this.domainBindingSession = session;
+    const progress = new Notice(copy.customDomainBinding, 0);
+    const debugLog = (entry) => this.recordDebugLog(entry);
+    const onStage = (stage) => {
+      session.stage = stage;
+      this.recordDeploymentLog({ type: "stage", stage, message: stage });
+      progress.setMessage?.(copy.customDomainBinding);
+      this.refreshSettingTab();
+    };
+    let callback;
+    let accessToken = "";
+    try {
+      await this.loadSettings();
+      const originUrl = String(this.settings.deploymentOriginUrl || "").replace(/\/$/, "");
+      const workerName = this.settings.deploymentWorkerName || workerNameFromServiceUrl(originUrl);
+      if (!originUrl || !workerName) throw new CloudflareProvisioningError("CUSTOM_DOMAIN_ORIGIN_MISSING", "The original Worker address is unavailable", { stage: "resources" });
+      onStage("authorization");
+      const authorized = await authorizeCloudflareScope(CLOUDFLARE_DOMAIN_OAUTH_SCOPE, { debugLog });
+      callback = authorized.callback;
+      accessToken = authorized.accessToken;
+      const cf = (path, init = {}, options = {}) => cloudflareApiRequest(path, accessToken, init, { stage: session.stage, debugLog, ...options });
+      onStage("accounts");
+      const accounts = await cf("/accounts?per_page=50");
+      if (!Array.isArray(accounts) || accounts.length !== 1 || !accounts[0]?.id) throw new CloudflareProvisioningError(accounts?.length > 1 ? "MULTIPLE_ACCOUNTS" : "NO_ACCOUNT_ACCESS", "Authorize exactly one Cloudflare account to unbind this domain", { stage: session.stage });
+      const accountId = String(accounts[0].id);
+      onStage("resources");
+      const domains = await cf(`/accounts/${encodeURIComponent(accountId)}/workers/domains`);
+      const currentDomains = Array.isArray(domains) ? domains : [];
+      const savedDomainId = String(this.settings.customDomainId || "");
+      const foundById = savedDomainId ? currentDomains.find((domain) => String(domain?.id || "") === savedDomainId) : undefined;
+      const foundByHostname = currentDomains.find((domain) => normalizeCustomDomain(domain?.hostname) === hostname);
+      const found = foundById || (foundByHostname && String(foundByHostname.service || "") === workerName ? foundByHostname : undefined);
+      if (foundByHostname && !foundById && String(foundByHostname.service || "") !== workerName) {
+        throw new CloudflareProvisioningError("CUSTOM_DOMAIN_NOT_OWNED", "This custom domain is not attached to this One-Click Publish Worker", { stage: session.stage });
+      }
+      const domainId = String(found?.id || savedDomainId);
+      if (!domainId) {
+        throw new CloudflareProvisioningError("CUSTOM_DOMAIN_NOT_FOUND", "Cloudflare could not find the saved custom domain attachment", { stage: session.stage });
+      }
+      const transition = {
+        state: "detaching",
+        operationId: session.operationId,
+        hostname,
+        domainId,
+        originUrl,
+        workerName,
+        startedAt: new Date().toISOString(),
+      };
+      try {
+        await this.saveSettings({ customDomainTransition: transition });
+      } catch (saveCause) {
+        throw new CloudflareProvisioningError("LOCAL_SETTINGS_SAVE_FAILED", "Could not prepare the local custom-domain state", {
+          stage: "save",
+          causeMessage: saveCause instanceof Error ? saveCause.message : String(saveCause),
+          remoteOutcome: "not_started",
+        });
+      }
+      onStage("domain_detach");
+      session.remoteOutcome = "delete_requested";
+      await cf(`/accounts/${encodeURIComponent(accountId)}/workers/domains/${encodeURIComponent(domainId)}`, { method: "DELETE" });
+      session.remoteOutcome = "detached";
+      try {
+        await this.saveSettings({
+          cloudflareMode: "self",
+          apiBaseUrl: originUrl,
+          serviceUrl: originUrl,
+          deploymentWorkerUrl: originUrl,
+          deploymentOriginUrl: originUrl,
+          customDomain: "",
+          customDomainId: "",
+          customDomainZoneName: "",
+          customDomainStatus: "none",
+          customDomainTransition: null,
+          connectionStatus: "connected",
+          deploymentStatus: "ready",
+          lastPublishedUrl: rewriteUrlOrigin(this.settings.lastPublishedUrl, customDomainUrl(hostname), originUrl),
+        });
+      } catch (saveCause) {
+        throw new CloudflareProvisioningError("LOCAL_SETTINGS_SAVE_FAILED", "Cloudflare detached the domain but local settings could not be saved", {
+          stage: "save",
+          causeMessage: saveCause instanceof Error ? saveCause.message : String(saveCause),
+          remoteOutcome: session.remoteOutcome,
+        });
+      }
+      new Notice(copy.customDomainUnbound);
+      return true;
+    } catch (cause) {
+      const error = cause instanceof CloudflareProvisioningError ? cause : new CloudflareProvisioningError("CUSTOM_DOMAIN_UNBINDING_FAILED", "Custom domain unbinding failed", {
+        stage: session.stage,
+        causeMessage: cause instanceof Error ? cause.message : String(cause),
+        remoteOutcome: session.remoteOutcome,
+      });
+      if (!error.remoteOutcome) error.remoteOutcome = session.remoteOutcome;
+      error.operationId = session.operationId;
+      session.error = error;
+      this.recordDeploymentLog({ error });
+      new Notice(`${copy.customDomainUnbindingFailed}: ${customDomainFailureMessage(error, copy)}`, 12_000);
+      return false;
+    } finally {
+      progress.hide?.();
+      callback?.close();
+      if (callback) await callback.closed;
+      if (accessToken) {
+        try { await revokeCloudflareToken(accessToken, { debugLog }); }
+        catch (error) { session.cleanupError = error; this.recordDeploymentLog({ error }); new Notice(copy.oauthCleanupWarning); }
+      }
+      accessToken = "";
+      await this.persistDeploymentLogs(session);
+      await this.persistDebugLogs();
+      session.active = false;
+      this.refreshSettingTab();
+    }
+  }
+
+  async recoverCustomDomainTransition() {
+    if (this.domainBindingPromise) return false;
+    const transition = normalizeCustomDomainTransition(this.settings?.customDomainTransition);
+    if (!transition) return true;
+    if (!isDesktopEnvironment()) {
+      new Notice(this.copy().customDomainDesktopOnly);
+      return false;
+    }
+    this.domainBindingPromise = this.runCustomDomainTransitionRecovery(transition);
+    try { return await this.domainBindingPromise; } finally { this.domainBindingPromise = null; }
+  }
+
+  async runCustomDomainTransitionRecovery(transition) {
+    const copy = this.copy();
+    const session = { operationId: transition.operationId || createOperationId("domain-recovery"), remoteOutcome: "not_started", stage: "authorization", active: true, error: null, logs: [] };
+    this.domainBindingSession = session;
+    const progress = new Notice(copy.customDomainBinding, 0);
+    const debugLog = (entry) => this.recordDebugLog(entry);
+    const onStage = (stage) => {
+      session.stage = stage;
+      this.recordDeploymentLog({ type: "stage", stage, message: stage });
+      progress.setMessage?.(copy.customDomainBinding);
+      this.refreshSettingTab();
+    };
+    let callback;
+    let accessToken = "";
+    try {
+      const originUrl = transition.originUrl || String(this.settings.deploymentOriginUrl || "").replace(/\/$/, "");
+      const workerName = transition.workerName || this.settings.deploymentWorkerName || workerNameFromServiceUrl(originUrl);
+      if (!originUrl || !workerName) throw new CloudflareProvisioningError("CUSTOM_DOMAIN_ORIGIN_MISSING", "The original Worker address is unavailable", { stage: "resources" });
+      onStage("authorization");
+      const authorized = await authorizeCloudflareScope(CLOUDFLARE_DOMAIN_OAUTH_SCOPE, { debugLog });
+      callback = authorized.callback;
+      accessToken = authorized.accessToken;
+      const cf = (path, init = {}, options = {}) => cloudflareApiRequest(path, accessToken, init, { stage: session.stage, debugLog, ...options });
+      onStage("accounts");
+      const accounts = await cf("/accounts?per_page=50");
+      if (!Array.isArray(accounts) || accounts.length !== 1 || !accounts[0]?.id) throw new CloudflareProvisioningError(accounts?.length > 1 ? "MULTIPLE_ACCOUNTS" : "NO_ACCOUNT_ACCESS", "Authorize exactly one Cloudflare account to recover this domain", { stage: session.stage });
+      const accountId = String(accounts[0].id);
+      onStage("resources");
+      const domains = await cf(`/accounts/${encodeURIComponent(accountId)}/workers/domains`);
+      const currentDomains = Array.isArray(domains) ? domains : [];
+      const foundById = transition.domainId ? currentDomains.find((domain) => String(domain?.id || "") === transition.domainId) : undefined;
+      const foundByHostname = currentDomains.find((domain) => normalizeCustomDomain(domain?.hostname) === transition.hostname);
+      const found = foundById || foundByHostname;
+      if (found && String(found.service || "") !== workerName) {
+        throw new CloudflareProvisioningError("CUSTOM_DOMAIN_NOT_OWNED", "This custom domain is not attached to this One-Click Publish Worker", { stage: session.stage, remoteOutcome: "inspected" });
+      }
+      session.remoteOutcome = found ? "attached" : "detached";
+      if (found) {
+        await this.saveSettings({ customDomainTransition: null });
+        new Notice(copy.customDomainRecoveryRestored);
+      } else {
+        try {
+          await this.saveSettings({
+            cloudflareMode: "self",
+            apiBaseUrl: originUrl,
+            serviceUrl: originUrl,
+            deploymentWorkerUrl: originUrl,
+            deploymentOriginUrl: originUrl,
+            deploymentWorkerName: workerName,
+            customDomain: "",
+            customDomainId: "",
+            customDomainZoneName: "",
+            customDomainStatus: "none",
+            customDomainTransition: null,
+            connectionStatus: "connected",
+            deploymentStatus: "ready",
+            lastPublishedUrl: rewriteUrlOrigin(this.settings.lastPublishedUrl, customDomainUrl(transition.hostname), originUrl),
+          });
+        } catch (saveCause) {
+          throw new CloudflareProvisioningError("LOCAL_SETTINGS_SAVE_FAILED", "Cloudflare has no attachment, but local settings could not be finalized", {
+            stage: "save",
+            causeMessage: saveCause instanceof Error ? saveCause.message : String(saveCause),
+            remoteOutcome: session.remoteOutcome,
+          });
+        }
+        new Notice(copy.customDomainRecoveryCompleted);
+      }
+      return true;
+    } catch (cause) {
+      const error = cause instanceof CloudflareProvisioningError ? cause : new CloudflareProvisioningError("CUSTOM_DOMAIN_RECOVERY_FAILED", "Custom domain state recovery failed", {
+        stage: session.stage,
+        causeMessage: cause instanceof Error ? cause.message : String(cause),
+        remoteOutcome: session.remoteOutcome,
+      });
+      if (!error.remoteOutcome) error.remoteOutcome = session.remoteOutcome;
+      error.operationId = session.operationId;
+      session.error = error;
+      this.recordDeploymentLog({ error });
+      new Notice(`${copy.customDomainRecoveryFailed}: ${customDomainFailureMessage(error, copy)}`, 12_000);
+      return false;
+    } finally {
+      progress.hide?.();
+      callback?.close();
+      if (callback) await callback.closed;
+      if (accessToken) {
+        try { await revokeCloudflareToken(accessToken, { debugLog }); }
+        catch (error) { session.cleanupError = error; this.recordDeploymentLog({ error }); new Notice(copy.oauthCleanupWarning); }
       }
       accessToken = "";
       await this.persistDeploymentLogs(session);
@@ -2330,12 +3043,16 @@ class SharePublisherSettingTab extends PluginSettingTab {
     this.plugin = plugin;
     this.disconnectPending = false;
     this.disconnectBusy = false;
+    this.customDomainInput = "";
+    this.customDomainConfirmation = "";
   }
 
   display() {
     const { containerEl } = this;
     const copy = copyForLanguage(this.plugin.settings.language);
-    const session = this.plugin.deploymentSession;
+    const session = [this.plugin.deploymentSession, this.plugin.domainBindingSession].find((item) => item?.active)
+      || this.plugin.domainBindingSession
+      || this.plugin.deploymentSession;
     const cloudflareBusy = session?.active === true;
     const hasPersonal = Boolean(this.plugin.settings.deploymentWorkerUrl && this.plugin.settings.selfPublishToken);
     const personalSelected = hasPersonal && this.plugin.settings.cloudflareMode === "self";
@@ -2360,9 +3077,9 @@ class SharePublisherSettingTab extends PluginSettingTab {
       .setName(copy.deployToCloudflare)
       .setDesc(`${copy.selfCloudflareDescription} ${copy.deploymentDescription} ${!hasPersonal && !isDesktopEnvironment() ? copy.desktopDeploymentOnly : ""} ${personalSelected ? copy.selectedMode : copy.notSelectedMode} ${hasPersonal ? copy.disconnectCloudflareDescription : ""} ${this.disconnectPending ? copy.disconnectConfirm : ""}${session?.active ? ` · ${deploymentProgress(session.stage, copy)}` : ""}${session?.error ? ` · ${deploymentFailure(session.error, copy)}` : ""}`);
     if (!this.disconnectPending) cloudflareSetting.addButton((button) => button
-      .setButtonText(personalSelected ? copy.connected : hasPersonal ? copy.useConnection : copy.deployToCloudflare)
+      .setButtonText(personalSelected ? copy.updateCloudflareWorker : hasPersonal ? copy.useConnection : copy.deployToCloudflare)
       .setCta()
-      .setDisabled(cloudflareBusy || personalSelected || (!hasPersonal && !isDesktopEnvironment()))
+      .setDisabled(cloudflareBusy || (!hasPersonal && !isDesktopEnvironment()) || (personalSelected && !isDesktopEnvironment()))
       .onClick(() => void this.plugin.deployToCloudflare().then(() => this.display())));
     if (hasPersonal) cloudflareSetting.addButton((button) => button
       .setButtonText(this.disconnectPending ? copy.confirmDisconnect : copy.disconnectCloudflare)
@@ -2395,6 +3112,105 @@ class SharePublisherSettingTab extends PluginSettingTab {
         this.disconnectPending = false;
         this.display();
       }));
+    if (personalSelected && workerVersionNeedsUpdate(this.plugin.settings)) {
+      new Setting(containerEl)
+        .setName(copy.workerUpdateRequiredTitle)
+        .setDesc(this.plugin.settings.workerVersionStatus === "unreachable"
+          ? copy.workerVersionUnavailable
+          : copy.workerUpdateRequired(this.plugin.settings.workerVersion, EMBEDDED_TARGET_PLUGIN_VERSION));
+    }
+    const customDomain = normalizeCustomDomain(this.plugin.settings.customDomain);
+    const recoveryPending = Boolean(this.plugin.settings.customDomainTransition);
+    const domainBusy = Boolean(this.plugin.domainBindingPromise || this.plugin.domainBindingSession?.active || recoveryPending);
+    const domainCandidate = normalizeCustomDomain(this.customDomainInput);
+    const bindConfirmationPending = Boolean(domainCandidate) && this.customDomainConfirmation === `bind:${domainCandidate}`;
+    const unbindConfirmationPending = Boolean(customDomain) && this.customDomainConfirmation === `unbind:${customDomain}`;
+    const activePublishUrl = String(this.plugin.settings.apiBaseUrl || "").replace(/\/$/, "");
+    const customDomainSetting = new Setting(containerEl)
+      .setName(copy.customDomain)
+      .setDesc(`${copy.customDomainDescription}${customDomain ? ` ${copy.customDomainStatus}: ${customDomain}${activePublishUrl ? ` · ${copy.customDomainActiveAddress(activePublishUrl)}` : ""}` : ""}${recoveryPending ? ` ${copy.customDomainRecoveryRequired}` : bindConfirmationPending ? ` ${copy.customDomainConfirm(domainCandidate)}` : unbindConfirmationPending ? ` ${copy.customDomainUnbindConfirm(customDomain)}` : ""}${!hasPersonal ? ` ${copy.customDomainNotConfigured}` : !isDesktopEnvironment() ? ` ${copy.customDomainDesktopOnly}` : ""}`)
+      .addText((text) => {
+        text.setValue(this.customDomainInput || customDomain);
+        text.setPlaceholder(copy.customDomainPlaceholder);
+        text.inputEl.disabled = !hasPersonal || domainBusy || Boolean(customDomain) || bindConfirmationPending || unbindConfirmationPending;
+        text.onChange((value) => { this.customDomainInput = value; this.customDomainConfirmation = ""; });
+      });
+    if (recoveryPending) {
+      customDomainSetting.addButton((button) => button
+        .setButtonText(copy.customDomainRecover)
+        .setCta()
+        .setDisabled(!isDesktopEnvironment() || Boolean(this.plugin.domainBindingPromise))
+        .onClick(() => void this.plugin.recoverCustomDomainTransition().then(() => this.display()).catch((error) => new Notice(`${copy.customDomainRecoveryFailed}: ${error instanceof Error ? error.message : String(error)}`, 12_000))));
+    } else if (hasPersonal && customDomain) {
+      if (unbindConfirmationPending) {
+        customDomainSetting.addButton((button) => button
+          .setButtonText(copy.customDomainConfirmAction)
+          .setCta()
+          .setDisabled(domainBusy || !isDesktopEnvironment())
+          .onClick(() => {
+            this.customDomainConfirmation = "";
+            void this.plugin.unbindCustomDomain().then(() => {
+              this.customDomainInput = "";
+              this.display();
+            });
+          }));
+        customDomainSetting.addButton((button) => button
+          .setButtonText(copy.customDomainCancelAction)
+          .setDisabled(domainBusy)
+          .onClick(() => { this.customDomainConfirmation = ""; this.display(); }));
+      } else {
+        customDomainSetting.addButton((button) => button
+          .setButtonText(copy.customDomainUnbind)
+          .setDisabled(domainBusy || !isDesktopEnvironment())
+          .onClick(() => { this.customDomainConfirmation = `unbind:${customDomain}`; this.display(); }));
+      }
+    } else if (hasPersonal) {
+      if (bindConfirmationPending) {
+        customDomainSetting.addButton((button) => button
+          .setButtonText(copy.customDomainConfirmAction)
+          .setCta()
+          .setDisabled(domainBusy || !isDesktopEnvironment())
+          .onClick(() => {
+            const value = this.customDomainInput;
+            this.customDomainConfirmation = "";
+            void this.plugin.bindCustomDomain(value).then((bound) => {
+              if (bound) this.customDomainInput = "";
+              this.display();
+            });
+          }));
+        customDomainSetting.addButton((button) => button
+          .setButtonText(copy.customDomainCancelAction)
+          .setDisabled(domainBusy)
+          .onClick(() => { this.customDomainConfirmation = ""; this.display(); }));
+      } else {
+        customDomainSetting.addButton((button) => button
+          .setButtonText(copy.bindCustomDomain)
+          .setCta()
+          .setDisabled(domainBusy || !isDesktopEnvironment())
+          .onClick(() => {
+            const candidate = normalizeCustomDomain(this.customDomainInput);
+            if (!candidate) {
+              void this.plugin.bindCustomDomain(this.customDomainInput).then(() => this.display());
+              return;
+            }
+            this.customDomainConfirmation = `bind:${candidate}`;
+            this.display();
+          }));
+      }
+    }
+    const domainBindingSession = this.plugin.domainBindingSession;
+    const domainBindingLogs = [...(domainBindingSession?.logs || [])].slice(-60);
+    if (!this.plugin.settings.debugMode && domainBindingSession?.error && domainBindingLogs.length) {
+      const details = containerEl.createEl("details");
+      details.open = true;
+      details.createEl("summary", { text: copy.customDomainDiagnostics });
+      const diagnosticLogText = JSON.stringify(domainBindingLogs, null, 2);
+      details.createEl("pre", { text: diagnosticLogText });
+      new Setting(details)
+        .addButton((button) => button.setButtonText(copy.copyTechnicalDetails).onClick(() => void copyTextToClipboard(diagnosticLogText).then((ok) => new Notice(ok ? copy.copied : copy.copyFailed))));
+      new Setting(details)
+        .addButton((button) => button.setButtonText(copy.clearTechnicalDetails).onClick(() => void this.plugin.clearOperationDiagnostics(domainBindingSession).then(() => this.display())));
+    }
     const deploymentLogs = [...(this.plugin.settings.deploymentLogs || []), ...(session?.logs || [])].slice(-60);
     if (this.plugin.settings.debugMode && deploymentLogs.length) {
       const logDetails = containerEl.createEl("details");
@@ -2404,7 +3220,7 @@ class SharePublisherSettingTab extends PluginSettingTab {
       logDetails.createEl("pre", { text: logText });
       new Setting(logDetails)
         .addButton((button) => button.setButtonText(copy.copyDeploymentLogs).onClick(() => void copyTextToClipboard(logText).then((ok) => new Notice(ok ? copy.copied : copy.copyFailed))))
-        .addButton((button) => button.setButtonText(copy.clearDeploymentLogs).onClick(() => void this.plugin.clearDeploymentLogs().then(() => this.display())));
+        .addButton((button) => button.setButtonText(copy.clearDeploymentLogs).setDisabled(Boolean(session?.active)).onClick(() => void this.plugin.clearDeploymentLogs().then(() => this.display())));
     }
     const diagnostics = [session?.error, session?.cleanupError].filter(Boolean);
     if (diagnostics.length) {
@@ -2413,7 +3229,8 @@ class SharePublisherSettingTab extends PluginSettingTab {
       const technicalText = JSON.stringify(diagnostics.map(deploymentDiagnostic), null, 2);
       details.createEl("pre", { text: technicalText });
       new Setting(details)
-        .addButton((button) => button.setButtonText(copy.copyTechnicalDetails).onClick(() => void copyTextToClipboard(technicalText).then((ok) => new Notice(ok ? copy.copied : copy.copyFailed))));
+        .addButton((button) => button.setButtonText(copy.copyTechnicalDetails).onClick(() => void copyTextToClipboard(technicalText).then((ok) => new Notice(ok ? copy.copied : copy.copyFailed))))
+        .addButton((button) => button.setButtonText(copy.clearTechnicalDetails).onClick(() => void this.plugin.clearOperationDiagnostics(session).then(() => this.display())));
     }
     const debugLogs = [...(this.plugin.settings.debugLogs || [])].slice(-120);
     if (this.plugin.settings.debugMode) {
@@ -2504,6 +3321,22 @@ function deploymentFailure(error, copy) {
   return `${copy.deploymentFailed} · ${stage}：${copy.deploymentInternalError}：${internal} ${reason}${externalText}${cleanupText}`;
 }
 
+function customDomainFailureMessage(error, copy) {
+  if (error?.code === "OAUTH_DENIED"
+    && error?.providerCode === "invalid_scope"
+    && /workers-routes\.write/i.test(String(error?.providerMessage || ""))) {
+    return copy.customDomainOAuthScopeUnavailable;
+  }
+  if (error?.code === "CUSTOM_DOMAIN_ZONE_NOT_FOUND" || error?.code === "CUSTOM_DOMAIN_ZONE_INACTIVE") return copy.customDomainZoneNotFound;
+  if (error?.code === "CUSTOM_DOMAIN_NOT_OWNED") return copy.customDomainNotOwned;
+  if (error?.code === "CUSTOM_DOMAIN_NOT_FOUND") return copy.customDomainNotFound;
+  if (error?.code === "LOCAL_SETTINGS_SAVE_FAILED") {
+    const cause = sanitizeExternalMessage(error?.causeMessage);
+    return `${copy.customDomainLocalSaveFailed}${cause ? ` ${cause}` : ""}`;
+  }
+  return sanitizeExternalMessage(error?.providerMessage || error?.message) || copy.deploymentReasons.generic;
+}
+
 function deploymentDiagnostic(error) {
   return {
     stage: error.stage,
@@ -2516,6 +3349,9 @@ function deploymentDiagnostic(error) {
     providerCode: error.providerCode,
     providerMessage: error.providerMessage,
     responseContentType: error.responseContentType,
+    causeMessage: error.causeMessage,
+    remoteOutcome: error.remoteOutcome,
+    operationId: error.operationId,
     internal: { code: error.code, message: sanitizeExternalMessage(error.message), stage: error.stage },
     external: { httpStatus: error.httpStatus, code: error.providerCode, message: error.providerMessage, contentType: error.responseContentType },
     outcomeUnknown: error.outcomeUnknown,
@@ -2527,6 +3363,7 @@ function deploymentLogRecord(input = {}) {
   const diagnostic = input.error ? deploymentDiagnostic(input.error) : input;
   return {
     timestamp: String(input.timestamp || new Date().toISOString()).slice(0, 40),
+    operationId: normalizeOperationId(input.operationId || diagnostic.operationId),
     type: sanitizeExternalMessage(input.type || (input.error ? "error" : "stage")) || "event",
     stage: sanitizeExternalMessage(diagnostic.stage),
     code: sanitizeProviderCode(diagnostic.code),
@@ -2538,6 +3375,8 @@ function deploymentLogRecord(input = {}) {
     providerCode: sanitizeProviderCode(diagnostic.providerCode || diagnostic.external?.code),
     providerMessage: sanitizeExternalMessage(diagnostic.providerMessage || diagnostic.external?.message),
     responseContentType: sanitizeExternalMessage(diagnostic.responseContentType || diagnostic.external?.contentType),
+    causeMessage: sanitizeExternalMessage(diagnostic.causeMessage),
+    remoteOutcome: sanitizeProviderCode(diagnostic.remoteOutcome),
     outcomeUnknown: diagnostic.outcomeUnknown === true,
     cleanupIncomplete: diagnostic.cleanupIncomplete === true,
   };
@@ -2553,6 +3392,7 @@ function debugLogRecord(input = {}) {
   const source = error ? { ...error, ...input } : input;
   return {
     timestamp: String(input.timestamp || new Date().toISOString()).slice(0, 40),
+    operationId: normalizeOperationId(input.operationId || source.operationId),
     type: sanitizeExternalMessage(input.type || "event") || "event",
     stage: sanitizeExternalMessage(source.stage || input.stage),
     method: sanitizeProviderCode(source.method || input.method),

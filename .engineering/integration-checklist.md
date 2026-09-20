@@ -8,6 +8,7 @@
 - [x] revision/current 指针和 current-only 语义已记录。
 - [x] 大发布包使用 C-005 protocol v2：页面 UTF-8 拼接、二进制 chunk 独立 base64 解码、最后原子提交；分片/提交失败不会切换旧 revision。
 - [x] C-009 发布产物契约已冻结：`plugin/` 源文件生成根目录镜像、Release 暂存包和 Vault runtime，版本与内容必须一致。
+- [x] C-010 个人自定义域名契约已冻结：同一 Cloudflare 账户的 active Zone 支持根域名/子域名，每个 Worker 一个主域名，workers.dev 保留为 fallback。
 
 ## Work-package gate
 
@@ -38,23 +39,27 @@
 - [x] C-005 v2 对二进制资源逐片解码；大文件 Viewer 使用 Worker `ReadableStream` 逐 chunk 输出。
 - [x] 账户恢复码只消费一次；恢复后既有 session 和 Publish Token 全部撤销。
 - [x] device code 10 分钟过期、单次消费；插件不保存 Cloudflare 管理 Token。
-- [x] 50MB/10 Note 配额、更新替换占用、删除站点和安全错误 code 有 core 测试。
+- [x] 账户级内容配额已取消；超过原 50MB 的内容、无限制 Note 数量、更新替换占用、删除站点和安全错误 code 有 core 测试。
 - [x] D1 migration 包含 accounts、sessions、tokens、sites、revisions、objects、object_chunks、uploads、upload_objects、device_authorizations、recovery_codes，以及个人 D1-only 的 BLOB 列。
 - [x] 深度 0/1/2/3 的插件遍历边界和循环引用去重有测试；指定大型笔记的只读统计为 1/5/11/22 篇。
 - [x] Publish API → Viewer 的随机 siteId/path 关系有测试，根页面使用 `index.html`。
 - [x] 引用页面直接位于站点目录下，页面编号按规范化源路径排序。
 - [x] Worker HTTP 路由在 Node Request/Response mock 中验证健康检查、未授权 JSON 错误和流式 Viewer。
 - [x] 个人部署在 Node mock 中验证 PKCE、OAuth state、拒绝、loopback callback、唯一账户、Worker/D1 创建顺序、目标初始化、bootstrap secret 清理、OAuth revoke 和失败清理；断言个人路径不请求 R2。
+- [x] 个人自定义域名在 Node mock 中验证 PKCE 临时 scope、账户/Zone 查询、同 Worker 已有域名检查、根域名与子域名输入、attach/detach、OAuth revoke，以及解绑后恢复 workers.dev。
+- [x] 已有个人 Worker 可在插件更新后原地刷新 Worker artifact，复用 D1、保留 Worker URL/自定义域名且不删除既有资源；`/healthz` 返回 Worker 版本，设置页和发布前会拦截历史/无法确认版本并提示手动更新。
+- [x] Worker 通过自定义域名访问时使用请求 origin 生成分享链接；未绑定或解绑后继续使用 Worker origin。
 - [x] 插件设置页提供“部署到我的 Cloudflare”，桌面版直接调用 Cloudflare OAuth/API 并保存 Worker URL/Publish Token；插件源码不包含 Cloudflare 管理 Token 或 client secret，也不请求 provisioning control plane。
 - [x] Computer Use 手工验证 Obsidian 1.13.7 设置页：当前只保留“部署到我的 Cloudflare”入口；移动端部署按钮禁用并显示“请先在桌面版完成部署”，Debug 关闭时不展示日志；官方连接入口保留为规划，不在当前设置页提供。
 - [x] 设置页提供“取消连接”：仅清除当前 Vault 的 Worker 地址和 Publish Token，保留 Cloudflare 资源、已发布网站和其他设备连接，并在执行前确认。
 - [x] 目标 Worker 提供一次性签名初始化接口，不要求用户填写邮箱、密码、恢复码或 Bootstrap Secret；初始化后删除 Worker secret。
 - [ ] 公开 OAuth Client ID 注入正式插件构建、Cloudflare API 资源创建和桌面端真实部署待 staging 凭据。
+- [ ] 真实 Cloudflare Custom Domain 绑定、DNS/证书生效、根域名既有路由冲突和跨设备同步待 staging 域名凭据。
 - [ ] `wrangler dev` + 本地 D1-only 模拟待安装 Wrangler 后执行；官方 R2 binding smoke 单独执行。
 - [x] Obsidian Plugin 已接入本地测试服务。
 - [x] 本地插件 artifact 包含自包含的 `manifest.json` 和 `main.js` runtime；`compiler.js` 仅保留为开发参考，不进入安装包。
 - [x] `npm run update:plugin` 已验证会重新构建、生成根目录镜像、准备 Release 暂存包、运行 parity check 并同步 Vault。
-- [x] GitHub Actions 已加入 main/tag 校验；tag 必须匹配 manifest 版本，Release 仅上传生成的插件资产。
+- [x] GitHub Actions 已加入 main/tag 校验；tag 必须匹配 manifest 版本，Release 仅上传生成的插件资产，并使用 `package-lock.json` 与 GitHub artifact attestation 验证构建来源。
 - [x] 真实 Obsidian vault 中的加载、当前笔记首发/更新和 frontmatter 回写已验证。
 
 ## Regression and recovery gate
@@ -70,6 +75,7 @@
 - [ ] 失败提交保留旧 revision 的测试待补充异常注入后完成。
 - [ ] 真实官方 Worker 部署、失败恢复和高级 Deploy Button/Wrangler/`/setup` 步骤待 WP-CF-3/WP-CF-4/WP-CF-6。
 - [ ] 真实桌面直连部署、跨账户/无账户 OAuth、资源冲突、远端 migration、更新和删除待 WP-CF-7/WP-CF-6；需同时验证控制面不可用时已有个人 Worker 仍可发布。
+- [x] 自定义域名失败/解绑保留原 workers.dev 发布入口；域名绑定失败不会覆盖已有 Worker URL 或 Publish Token。
 
 ## Evidence
 

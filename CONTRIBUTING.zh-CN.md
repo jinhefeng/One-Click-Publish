@@ -67,7 +67,7 @@ plugin/styles.css 存在时才包含 styles.css
 
 每个版本都使用 `plugin/manifest.json` 中的完整版本号作为 `x.y.z` 标签，不能加 `v` 前缀。
 
-`.github/workflows/plugin-release.yml` 会在推送准确的 SemVer 标签后，先验证仓库，再创建 GitHub Release，并上传生成的 `manifest.json`、`main.js` 和可选的 `styles.css`。
+`.github/workflows/plugin-release.yml` 会从 `package-lock.json` 安装依赖、校验仓库、为准确的 Release 暂存资产生成 GitHub artifact attestation，并在推送准确的 SemVer 标签后创建 GitHub Release；Release 只包含生成的 `manifest.json`、`main.js` 和可选的 `styles.css`。
 
 推送版本前：
 
@@ -77,7 +77,7 @@ plugin/styles.css 存在时才包含 styles.css
 4. 确认根目录镜像和 Release 暂存文件与 `plugin/` 源文件字节一致。
 5. 推送 `main`。
 6. 推送匹配的标签，例如 `0.3.0`。
-7. 确认 GitHub Release 包含 `manifest.json` 和 `main.js`。
+7. 确认 GitHub Release 包含 `manifest.json` 和 `main.js`，并确认 workflow 已生成对应的 artifact attestation。
 
 插件正式发布后不要再修改插件 ID。修改 ID 会让 Obsidian 将其识别为另一个插件，并破坏正常更新链路。
 

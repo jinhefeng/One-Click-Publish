@@ -22,7 +22,7 @@
 - Owner: WP-001
 - Inputs: `PublishRequest { siteId?, idempotencyKey, bundle }`
 - Outputs: `PublishResult { siteId, url, revision, uploadedPaths }`
-- Compatibility: API 前缀 `/v1`；成功返回 200/201；发布会话首次可省略 `siteId`；重复 `idempotencyKey` 返回同一结果；非法请求返回安全的 `{ error, code }`；未授权返回 401；配额返回 413 `QUOTA_EXCEEDED`；站点上限返回 409 `LIMIT_EXCEEDED`。
+- Compatibility: API 前缀 `/v1`；成功返回 200/201；发布会话首次可省略 `siteId`；重复 `idempotencyKey` 返回同一结果；非法请求返回安全的 `{ error, code }`；未授权返回 401；单次请求超过 Worker 边界返回 413 `QUOTA_EXCEEDED`；不设置账户级内容配额或发布 Note 数量上限。
 - Verification: 本地内存服务测试；接入 Worker 后补充 HTTP fixture
 - Change rule: 修改请求/响应、状态码或错误格式前，必须通知 WP-002/WP-004 并更新契约测试
 
@@ -55,7 +55,7 @@
 - Consumers: Worker, console, release validation
 - Inputs: `wrangler.jsonc`、D1 migration、可选官方 R2 binding、`BOOTSTRAP_SECRET`、可选 `PUBLIC_BASE_URL`。
 - Outputs: personal D1 BLOB chunks or official private R2 chunks、D1 tenant metadata、`/s/{siteId}` current viewer、cron cleanup。
-- Compatibility: 缺少 `CONTENTS` binding 时使用 D1-only；官方 R2 key 使用 tenant/site/revision/object/chunk 前缀；D1 batch 才能更新 current；默认 workers.dev，PUBLIC_BASE_URL 可覆盖分享域名。
+- Compatibility: 缺少 `CONTENTS` binding 时使用 D1-only；官方 R2 key 使用 tenant/site/revision/object/chunk 前缀；D1 batch 才能更新 current；默认 workers.dev，PUBLIC_BASE_URL 可覆盖分享域名；Worker 通过自定义域名访问时以当前请求 origin 生成分享链接。
 - Verification: migration/schema checks、Node Worker import、`wrangler dev`/staging/production smoke。
 
 ### Contract C-008 — Desktop-direct personal Cloudflare provisioning
@@ -64,8 +64,8 @@
 - Producer: CMP-016 / WP-CF-7
 - Consumers: CMP-003 / WP-CF-5, CMP-015 / WP-CF-4, release validation
 - Inputs: Cloudflare Authorization Code callback `code/state` on `http://127.0.0.1:8976/oauth/callback`, S256 PKCE verifier, Cloudflare REST API, embedded Worker bundle and migration
-- Outputs: `{ serviceUrl, publishToken }`; the plugin saves only the Worker URL and scoped Publish Token
-- Compatibility: public OAuth Client has no client secret and requests only account-read, Workers Scripts write, and D1 write scopes; callback is loopback-only, state-checked, single-use and time-limited; access token stays in memory and is revoked after success/failure; only Worker/D1 conflicts are checked and never overwritten; target initialization accepts only one-time bootstrap secret plus short-lived HMAC claim; no R2 bucket is created; `server/provisioner` is not in the new personal path
+- Outputs: `{ serviceUrl, workerName, publishToken }`; the plugin saves the Worker origin, active publish URL, and scoped Publish Token
+- Compatibility: public OAuth Client has no client secret and requests only account-read, Workers Scripts write, and D1 write scopes for deployment; callback is loopback-only, state-checked, single-use and time-limited; access token stays in memory and is revoked after success/failure; only Worker/D1 conflicts are checked and never overwritten; target initialization accepts only one-time bootstrap secret plus short-lived HMAC claim; no R2 bucket is created; `server/provisioner` is not in the new personal path. Existing personal Worker/D1 pairs can be refreshed in place from a newer embedded artifact without replacing the Worker URL, D1 data, or active custom domain. The Worker reports the deployed plugin version through `/healthz`; the settings page warns on a historical or unverifiable version, and publishing stops until a manual update succeeds. A later custom-domain action uses a separate temporary OAuth scope for Workers custom domains and Zone Read, stores no management token, and keeps workers.dev as the fallback origin.
 - Verification: `tests/plugin-cloudflare.test.ts` covers PKCE, direct resource creation, revoke, mobile guard and name conflicts; `tests/provisioning.test.ts` remains a legacy control-plane regression; real desktop/Cloudflare smoke remains pending
 - Change rule: resource names, OAuth scopes, artifact version, callback lifetime or target initialization claim changes require plugin, Worker artifact, build and security tests together
 
@@ -80,6 +80,18 @@
 - Compatibility: `plugin/manifest.json` is the sole version authority; all generated manifest and runtime copies must be byte-identical to their source; Release tag must equal the `x.y.z` manifest version; `plugin/compiler.js`, source directories, and test files are never Release assets
 - Verification: `scripts/package-plugin.mjs`, `npm run check:plugin`, `npm run update:plugin`, and `.github/workflows/plugin-release.yml`
 - Change rule: changing the source/target mapping, allowed Release files, or version authority requires updating the packaging script, parity check, README pairs, AGENTS.md, and release workflow together
+
+### Contract C-010 — Personal custom domain binding
+
+- Status: implemented locally / remote pending
+- Producer: CMP-016 / WP-CF-8
+- Consumers: Obsidian settings, personal Worker viewer and publish client
+- Owner: T4
+- Inputs: root domain or subdomain, single-account Cloudflare OAuth authorization, existing personal Worker name
+- Outputs: active custom-domain URL, custom-domain metadata, and request-origin-based `/s/{siteId}` links; unbind restores the workers.dev URL
+- Compatibility: the hostname must belong to an active Zone in the authorized account; root domains and subdomains are accepted; v1 allows one primary custom domain per Worker; root-domain binding requires explicit confirmation; management access tokens remain memory-only and are revoked after the operation; workers.dev remains the fallback when no custom domain is active
+- Verification: `tests/plugin-cloudflare.test.ts` covers bind/unbind, PKCE scope, zone lookup and token revoke; `tests/cloudflare-core.test.ts` covers request-origin URL generation; real Cloudflare domain/certificate smoke remains pending
+- Change rule: changing domain ownership, OAuth scopes, active URL semantics, or one-domain policy requires updating plugin, Worker route, tests, README pairs, ADR-007 and this contract
 
 ### Contract C-003 — Site Metadata and revision rules
 
@@ -118,7 +130,7 @@
 - `acceptance`: `node --experimental-strip-types --test tests/publish-flow.test.ts` 通过；首发、重复发布、更新和 viewer 读取均有断言
 - `status`: complete
 - `task_refs`: T1, T1.1, T1.2, T1.3
-- `validation`: `npm test` passed on 2026-09-15; 25 tests passed, including queued upload assembly, atomic commit, auth/recovery/device pairing, quota/isolation, migration coverage, linked-page depth boundaries, and external-link preservation.
+- `validation`: `npm test` passed on 2026-09-15; 25 tests passed, including queued upload assembly, atomic commit, auth/recovery/device pairing, account isolation, migration coverage, linked-page depth boundaries, and external-link preservation.
 
 ### WP-002 — Content compiler
 
@@ -173,10 +185,10 @@
 ### WP-CF-1 — Portable Cloudflare service core
 
 - `package_id`: WP-CF-1
-- `goal`: 建立 Worker-compatible 的认证、设备授权、Token、上传、配额、提交和 Viewer 核心。
+- `goal`: 建立 Worker-compatible 的认证、设备授权、Token、上传、提交和 Viewer 核心，并保留请求/滥用边界。
 - `scope`: `server/core`, `server/worker/routes.ts`, `server/console`, C-005 v2 tests
 - `dependencies`: C-001, C-005
-- `acceptance`: Node mock 可完成注册、恢复、device pairing、Token、上传、提交、配额和 viewer；本地内存服务继续作为测试替身。
+- `acceptance`: Node mock 可完成注册、恢复、device pairing、Token、上传、提交和 viewer；本地内存服务继续作为测试替身，并验证超过原账户内容配额后仍可提交。
 - `status`: complete locally
 - `validation`: `npm test` 22 tests passed; `npm run check:worker` passed.
 
@@ -193,7 +205,7 @@
 
 - `package_id`: WP-CF-3
 - `goal`: 用共享 D1/R2 和产品域名提供官方托管模式。
-- `scope`: production Worker environment, account isolation, quota/abuse limits
+- `scope`: production Worker environment, account isolation, request/abuse limits
 - `dependencies`: WP-CF-1, WP-CF-2, C-006, C-007
 - `acceptance`: two accounts cannot read/update each other; official service can complete real Obsidian publish/update/delete.
 - `status`: blocked on production Cloudflare credentials/domain, code ready
@@ -222,7 +234,7 @@
 - `goal`: 完成 Token、usage、sites 控制台和真实环境验收证据。
 - `scope`: `server/console`, `tests`, `.engineering/integration-checklist.md`
 - `dependencies`: WP-CF-3, WP-CF-4, WP-CF-5
-- `acceptance`: auth failure, quota, delete, recovery, Worker failure, official and self-deploy paths all have evidence.
+- `acceptance`: auth failure, request-size handling, delete, recovery, Worker failure, official and self-deploy paths all have evidence.
 - `status`: console implemented; remote evidence pending
 
 ### WP-CF-7 — Desktop-direct personal Cloudflare deployment
@@ -234,14 +246,24 @@
 - `acceptance`: Node mock 可完成 loopback callback → token exchange → account/resource checks → resource creation → target initialization → bootstrap secret deletion → OAuth revoke；重复/冲突/中途失败不覆盖既有资源，移动端禁用部署但可使用同步后的 Worker 配置
 - `status`: implemented locally; public OAuth client injection and real desktop/Cloudflare smoke pending
 
+### WP-CF-8 — Personal custom domain binding
+
+- `package_id`: WP-CF-8
+- `goal`: 在设置页用一次短流程把当前个人 Worker 绑定到同一 Cloudflare 账户中的根域名或子域名，并可安全解绑。
+- `scope`: `plugin/main.js`, `server/core/service.ts`, `server/worker/routes.ts`, plugin/Worker tests, README pairs and engineering contracts
+- `dependencies`: C-004, C-007, C-008, C-010
+- `acceptance`: Node mock 可完成 PKCE 授权、账户/Zone 查询、已有域名检查、Custom Domain attach/detach、OAuth revoke；Worker 从自定义域名访问时返回当前域名链接；workers.dev fallback、移动端 guard、根域名确认和一 Worker 一主域名均有断言
+- `status`: implemented locally; real Cloudflare custom-domain/certificate smoke pending
+- `task_refs`: T4.3.1, T5.1
+
 ## Parallelism and ownership review
 
 | Boundary | Owner | Current write scope | Parallel rule |
 |---|---|---|---|
 | Shared contracts | WP-001 | `src/shared`, contract docs | WP-002/WP-003/WP-004 依赖冻结版本，不直接修改 |
 | Compiler | WP-002 | `src/compiler` | 可与 WP-003 并行；契约变更需回到 WP-001 |
-| Publish service | WP-003 | `server/worker` | 可与 WP-002/WP-004 并行；只消费 C-001/C-002 |
-| Plugin | WP-004 | `plugin` | 依赖 C-002/C-004；不修改 service 或 compiler 内部实现 |
+| Publish service | WP-003 | `server/core`, `server/worker` | 可与 WP-002/WP-004 并行；只消费 C-001/C-002/C-004 |
+| Plugin | WP-004 | `plugin` | 依赖 C-002/C-004/C-008/C-010；不修改 compiler 内部实现 |
 | Integration | WP-005 | `tests`, release docs | 只在依赖包形成可运行版本后执行 |
 
 当前没有重叠写入范围；WP-001 完成后才开放真正的并行实现。
