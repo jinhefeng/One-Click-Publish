@@ -100,13 +100,13 @@ test("direct personal deployment uses PKCE, creates isolated Cloudflare resource
     if (path.endsWith("/subdomain") && method === "POST") { assert.equal(JSON.parse(String(init.body)).enabled, true); return jsonResponse({ enabled: true }); }
     if (path.endsWith("/secrets/BOOTSTRAP_SECRET") && method === "DELETE") return jsonResponse({});
     if (path.endsWith("/query") && method === "POST") return jsonResponse([{ success: true }]);
-    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note", version: "0.3.9" }));
+    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note", version: "0.4.1" }));
     if (path.includes("/workers/scripts/") && method === "PUT") {
       const form = await new Response(init.body, { headers: init.headers }).formData();
       const metadata = JSON.parse(String(form.get("metadata")));
       assert.equal(metadata.main_module, "index.js");
       assert.equal(metadata.bindings.find((binding: any) => binding.type === "d1").id, "d1-uuid");
-      assert.equal(metadata.bindings.find((binding: any) => binding.name === "PUBLISH_NOTE_VERSION").text, "0.3.9");
+      assert.equal(metadata.bindings.find((binding: any) => binding.name === "PUBLISH_NOTE_VERSION").text, "0.4.1");
       assert.match(await (form.get("index.js") as File).text(), /export/);
       return jsonResponse({});
     }
@@ -193,11 +193,11 @@ test("updates an existing personal Worker in place so new publishing limits take
       const form = await new Response(init.body, { headers: init.headers }).formData();
       const module = await (form.get("index.js") as File).text();
       const metadata = JSON.parse(String(form.get("metadata")));
-      assert.equal(metadata.bindings.find((binding: any) => binding.name === "PUBLISH_NOTE_VERSION").text, "0.3.9");
+      assert.equal(metadata.bindings.find((binding: any) => binding.name === "PUBLISH_NOTE_VERSION").text, "0.4.1");
       assert.doesNotMatch(module, /Account site limit exceeded|MAX_SITE_COUNT|Account storage quota exceeded|MAX_ACCOUNT_BYTES|52428800/);
       return jsonResponse({});
     }
-    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note", version: "0.3.9" }));
+    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note", version: "0.4.1" }));
     if (path === "/__internal/provision/reconnect") return new Response(JSON.stringify({ accountId: "historical-account", publishToken: "pn_updated_token" }), { status: 200 });
     if (path.endsWith("/secrets/BOOTSTRAP_SECRET") && method === "DELETE") return jsonResponse({});
     throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
@@ -631,7 +631,7 @@ test("personal deployment reuses a recognized historical One-Click Publish D1 an
       assert.equal(metadata.bindings.find((binding: any) => binding.name === "DB").id, "historical-db");
       return jsonResponse({});
     }
-    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note", version: "0.3.9" }));
+    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note", version: "0.4.1" }));
     if (path === "/__internal/provision/reconnect") return new Response(JSON.stringify({ accountId: "historical-account", publishToken: "pn_reconnected" }), { status: 200 });
     if (path.endsWith("/secrets/BOOTSTRAP_SECRET") && method === "DELETE") return jsonResponse({});
     throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
@@ -698,7 +698,7 @@ test("personal deployment creates only the missing resource when a Worker or D1 
         assert.equal(metadata.bindings.find((binding: any) => binding.name === "DB").id, scenario.expectedDatabase, scenario.name);
         return jsonResponse({});
       }
-    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note", version: "0.3.9" }));
+    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: "publish-note", version: "0.4.1" }));
       if (path === scenario.initPath) return new Response(JSON.stringify({ accountId: "target-account", publishToken: "pn_personal_token" }), { status: 201 });
       if (path.endsWith("/secrets/BOOTSTRAP_SECRET") && method === "DELETE") return jsonResponse({});
       throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
@@ -1039,7 +1039,7 @@ function provisioningFixture(failStage = "", cleanupFails = false) {
     if (path === "/workers/scripts/publish-note") return ["worker_upload", "unknown_upload"].includes(failStage) ? failure() : jsonResponse({});
     if (path.endsWith("/subdomain")) return failStage === "worker_enable" ? failure() : jsonResponse({ enabled: true });
     if (path.endsWith("/query")) return jsonResponse([{ success: failStage !== "migration" }]);
-    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: failStage === "ready_check" ? "wrong-service" : "publish-note", version: "0.3.9" }));
+    if (path === "/healthz") return new Response(JSON.stringify({ status: "ok", service: failStage === "ready_check" ? "wrong-service" : "publish-note", version: "0.4.1" }));
     if (path === "/__internal/provision/initialize") return failStage === "initialize" ? new Response("Claim consumed", { status: 403 }) : new Response('{"publishToken":"pn_test"}', { status: 201 });
     throw new Error(`Unexpected request: ${method} ${path}`);
   };
@@ -1144,6 +1144,17 @@ test("disconnecting stays local, avoids native confirmation, and leaves settings
   assert.equal(plugin.settings.deploymentStatus, "not_deployed");
 });
 
+test("shows the Worker update action only when the saved Worker state needs remediation", () => {
+  const { PluginClass } = loadPlugin({ desktop: false });
+  const workerState = PluginClass.__testing.workerVersionUiState;
+  const current = { ...personalSettings, workerVersion: "0.4.1", workerVersionStatus: "current", workerVersionCheckedAt: Date.now() };
+  assert.equal(workerState(current), "current");
+  assert.equal(workerState({ ...current, workerVersion: "0.3.9", workerVersionStatus: "outdated" }), "needs_update");
+  assert.equal(workerState({ ...current, workerVersion: "", workerVersionStatus: "unreachable" }), "needs_update");
+  assert.equal(workerState({ ...personalSettings, workerVersion: "", workerVersionStatus: "unknown", workerVersionCheckedAt: 0 }), "checking");
+  assert.equal(workerState({ ...personalSettings, deploymentWorkerUrl: "", selfPublishToken: "" }), "not_applicable");
+});
+
 test("historical Worker versions are detected and publishing is paused until the Worker is updated", async () => {
   let remoteVersion = "0.3.6";
   const requests: string[] = [];
@@ -1177,10 +1188,10 @@ test("historical Worker versions are detected and publishing is paused until the
   assert.equal(requests.length, 1);
   assert.match(notices.at(-1) || "", /0\.3\.6/);
 
-  remoteVersion = "0.3.9";
+  remoteVersion = "0.4.1";
   const current = await plugin.refreshWorkerVersion({ force: true });
   assert.equal(current.status, "current");
-  assert.equal(current.version, "0.3.9");
+  assert.equal(current.version, "0.4.1");
   assert.equal(plugin.settings.workerVersionStatus, "current");
 });
 
@@ -1189,7 +1200,7 @@ test("publishing pins one connection across concurrent sync and does not call Cl
   let plugin: any;
   const { PluginClass, dependencies } = loadPlugin({ desktop: false, requestImpl: async ({ url, headers }) => {
     requests.push({ url, token: headers.authorization });
-    if (url.endsWith("/healthz")) return { status: 200, json: { status: "ok", service: "publish-note", version: "0.3.9" } };
+    if (url.endsWith("/healthz")) return { status: 200, json: { status: "ok", service: "publish-note", version: "0.4.1" } };
     assert.ok(url.startsWith("https://personal.example.test/"));
     assert.equal(headers.authorization, "Bearer pn_personal");
     if (url.endsWith("/v1/sites/uploads")) {

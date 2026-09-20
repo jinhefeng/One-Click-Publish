@@ -66,7 +66,7 @@ The active note is always the share root. Local images and supported referenced 
 - **Linked page depth**: controls linked-note traversal.
 - **Use Obsidian renderer**: preserves Obsidian rendering when supported.
 - **Custom domain**: optionally binds one root domain or subdomain in the connected Cloudflare account.
-- **Update Cloudflare Worker**: refreshes an existing personal Worker after a plugin update without replacing its published data.
+- **Update Cloudflare Worker**: appears only when the connected personal Worker needs a refresh, and updates it without replacing published data.
 - **Worker compatibility check**: compares the online Worker version with the plugin version in settings and before each publish; historical or unverifiable Workers must be updated first.
 - **Debug mode**: shows sanitized deployment and publishing diagnostics when troubleshooting.
 

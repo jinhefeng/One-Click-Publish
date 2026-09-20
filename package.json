@@ -1,6 +1,6 @@
 {
   "name": "obsidian-one-click-publish",
-  "version": "0.3.9",
+  "version": "0.4.1",
   "private": true,
   "description": "One-click publishing for active Obsidian Markdown notes through your Cloudflare Worker.",
   "author": "Jin Hefeng",

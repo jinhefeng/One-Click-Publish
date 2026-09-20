@@ -313,8 +313,8 @@ test("Worker router returns safe JSON errors and streams viewer chunks", async (
   const health = await routeRequest({ service, request: new Request("https://publish.example.com/healthz"), env: {} });
   assert.equal(health.status, 200);
   assert.deepEqual(await health.json(), { status: "ok", service: "publish-note", version: "unknown", storage: "cloudflare-d1" });
-  const versionedHealth = await routeRequest({ service, request: new Request("https://publish.example.com/healthz"), env: { PUBLISH_NOTE_VERSION: "0.3.8" } });
-  assert.deepEqual(await versionedHealth.json(), { status: "ok", service: "publish-note", version: "0.3.8", storage: "cloudflare-d1" });
+  const versionedHealth = await routeRequest({ service, request: new Request("https://publish.example.com/healthz"), env: { PUBLISH_NOTE_VERSION: "0.4.1" } });
+  assert.deepEqual(await versionedHealth.json(), { status: "ok", service: "publish-note", version: "0.4.1", storage: "cloudflare-d1" });
   assert.equal(registered.account.email, "owner@example.com");
 });
 
